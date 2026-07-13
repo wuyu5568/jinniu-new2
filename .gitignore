@@ -1,0 +1,26 @@
+﻿# Binaries
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Env / secrets
+.env
+.env.*
+
+# Node
+node_modules/
+web/**/dist/
+
+# Generated (keep committed if needed)
+# *.pb.go
+
+# OS
+.DS_Store
+Thumbs.db
