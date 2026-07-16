@@ -1,0 +1,30 @@
+package biz
+
+import "github.com/go-kratos/kratos/v2/errors"
+
+var (
+	ErrNotFound              = errors.NotFound("BIZ_NOT_FOUND", "resource not found")
+	ErrInvalidAmount         = errors.BadRequest("BIZ_INVALID_AMOUNT", "invalid amount")
+	ErrUnauthorized          = errors.Unauthorized("BIZ_UNAUTHORIZED", "unauthorized")
+	ErrForbidden             = errors.Forbidden("BIZ_FORBIDDEN", "forbidden")
+	ErrNotImplemented        = errors.New(501, "BIZ_NOT_IMPLEMENTED", "not implemented yet")
+	ErrUserNotFound          = errors.NotFound("BIZ_USER_NOT_FOUND", "user not found")
+	ErrInvalidSignature      = errors.Unauthorized("BIZ_INVALID_SIGNATURE", "invalid signature")
+	ErrInvalidNonce          = errors.BadRequest("BIZ_INVALID_NONCE", "invalid or expired nonce")
+	ErrInviteRequired        = errors.BadRequest("BIZ_INVITE_REQUIRED", "invite code required")
+	ErrInviteInvalid         = errors.BadRequest("BIZ_INVITE_INVALID", "invite code invalid")
+	ErrInsufficientBalance   = errors.BadRequest("BIZ_INSUFFICIENT_BALANCE", "insufficient balance")
+	ErrUserDisabled          = errors.Forbidden("BIZ_USER_DISABLED", "user disabled")
+	ErrLocationNotFound      = errors.NotFound("BIZ_LOCATION_NOT_FOUND", "location not found")
+	ErrNoActiveLocation      = errors.BadRequest("BIZ_NO_ACTIVE_LOCATION", "no active location")
+	ErrBelowMinWithdraw      = errors.BadRequest("BIZ_BELOW_MIN_WITHDRAW", "below min withdraw amount")
+	ErrWithdrawNotFound      = errors.NotFound("BIZ_WITHDRAW_NOT_FOUND", "withdraw not found")
+	ErrWithdrawConflict      = errors.BadRequest("BIZ_WITHDRAW_CONFLICT", "withdraw not pending")
+	ErrForceSettleDisabled   = errors.Forbidden("BIZ_FORCE_SETTLE_DISABLED", "force settle disabled")
+	ErrPayoutDisabled        = errors.Forbidden("BIZ_PAYOUT_DISABLED", "payout disabled")
+	ErrPayoutNotConfigured   = errors.BadRequest("BIZ_PAYOUT_NOT_CONFIGURED", "payout wallet or rpc not configured")
+	ErrPayoutAboveMax        = errors.Forbidden("BIZ_PAYOUT_ABOVE_MAX", "credited amount exceeds payout max usdt")
+	ErrPayoutMaxRequired     = errors.Forbidden("BIZ_PAYOUT_MAX_REQUIRED", "payout_enabled requires JINNIU_PAYOUT_MAX_USDT > 0")
+	ErrChainDepositExists    = errors.BadRequest("BIZ_CHAIN_DEPOSIT_EXISTS", "chain deposit index already processed")
+	ErrChainDepositNotSkipped = errors.BadRequest("BIZ_CHAIN_DEPOSIT_NOT_SKIPPED", "chain deposit index is not a skipped row")
+)

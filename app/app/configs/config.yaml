@@ -1,0 +1,29 @@
+server:
+  http:
+    addr: 0.0.0.0:8000
+    timeout: 10s
+data:
+  database:
+    driver: mysql
+    source: root:root@tcp(127.0.0.1:3306)/jinniu?charset=utf8mb4&parseTime=True&loc=Local
+auth:
+  jwt_key: "change-me-jwt-key"
+  admin_username: "admin"
+  admin_password: "admin123"
+  challenge_ttl: 300s
+app:
+  genesis_address: "0x9ddef22beb04103ae3726807cd8af247bf2b8bf6"
+  settle_cron: "0 0 * * *"
+  settle_timezone: "Asia/Shanghai"
+  # 本地/e2e 可 force=1；生产务必 false
+  allow_force_settle: true
+  # 提取打款（ADR 0010）；本地默认关。联调可用环境变量覆盖，勿把真实私钥写入本文件：
+  #   $env:JINNIU_PAYOUT_ENABLED="1"
+  #   $env:JINNIU_HOT_WALLET_KEY="<hex不含0x也可>"
+  #   $env:JINNIU_PAYOUT_MAX_USDT="1"   # B1 可选安全顶
+  #   可选 $env:JINNIU_BSC_RPC="https://..."
+  payout_enabled: false
+  payout_cron: ""
+  bsc_rpc: "https://bsc-dataseed.binance.org/"
+  usdt_address: "0x55d398326f99059fF775485246999027B3197955"
+  hot_wallet_key: ""

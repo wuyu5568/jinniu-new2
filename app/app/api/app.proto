@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package app.api;
+
+option go_package = "github.com/jinniu/app/app/app/api;api";
+
+// 金牛协议主 API 契约（文档用途；当前无 protoc，HTTP 路由在 internal/server/http.go 手写对齐）。
+
+service App {
+  // --- 用户端 /api/app_server ---
+  rpc LoginChallenge (LoginChallengeRequest) returns (LoginChallengeReply) {
+    option (google.api.http) = { post: "/api/app_server/v1/login/challenge" body: "*" };
+  }
+  rpc LoginVerify (LoginVerifyRequest) returns (LoginVerifyReply) {
+    option (google.api.http) = { post: "/api/app_server/v1/login/verify" body: "*" };
+  }
+  rpc GetMe (GetMeRequest) returns (GetMeReply) {
+    option (google.api.http) = { get: "/api/app_server/v1/me" };
+  }
+  rpc CreateLocation (CreateLocationRequest) returns (CreateLocationReply) {
+    option (google.api.http) = { post: "/api/app_server/v1/locations" body: "*" };
+  }
+  rpc ListLocations (ListLocationsRequest) returns (ListLocationsReply) {
+    option (google.api.http) = { get: "/api/app_server/v1/locations" };
+  }
+  rpc CreateWithdraw (CreateWithdrawRequest) returns (CreateWithdrawReply) {
+    option (google.api.http) = { post: "/api/app_server/v1/withdraws" body: "*" };
+  }
+  rpc ListWithdraws (ListWithdrawsRequest) returns (ListWithdrawsReply) {
+    option (google.api.http) = { get: "/api/app_server/v1/withdraws" };
+  }
+  rpc ListLedger (ListLedgerRequest) returns (ListLedgerReply) {
+    option (google.api.http) = { get: "/api/app_server/v1/ledger" };
+  }
+
+  // --- 管理端 /api/admin_jinniu（X-Admin-Key）---
+  rpc AdminRecharge (AdminRechargeRequest) returns (AdminRechargeReply) {
+    option (google.api.http) = { post: "/api/admin_jinniu/v1/users/recharge" body: "*" };
+  }
+  rpc AdminListWithdraws (AdminListWithdrawsRequest) returns (AdminListWithdrawsReply) {
+    option (google.api.http) = { get: "/api/admin_jinniu/v1/withdraws" };
+  }
+  rpc AdminApproveWithdraw (AdminApproveWithdrawRequest) returns (AdminApproveWithdrawReply) {
+    option (google.api.http) = { post: "/api/admin_jinniu/v1/withdraws/{id}/approve" body: "*" };
+  }
+  rpc AdminRejectWithdraw (AdminRejectWithdrawRequest) returns (AdminRejectWithdrawReply) {
+    option (google.api.http) = { post: "/api/admin_jinniu/v1/withdraws/{id}/reject" body: "*" };
+  }
+  rpc AdminListBusinessConfigs (AdminListBusinessConfigsRequest) returns (AdminListBusinessConfigsReply) {
+    option (google.api.http) = { get: "/api/admin_jinniu/v1/business_configs" };
+  }
+  rpc AdminUpdateBusinessConfig (AdminUpdateBusinessConfigRequest) returns (AdminUpdateBusinessConfigReply) {
+    option (google.api.http) = { put: "/api/admin_jinniu/v1/business_configs/{id}" body: "*" };
+  }
+  rpc AdminRunSettle (AdminRunSettleRequest) returns (AdminRunSettleReply) {
+    option (google.api.http) = { post: "/api/admin_jinniu/v1/settle/run" body: "*" };
+  }
+}
+
+message LoginChallengeRequest { string address = 1; }
+message LoginChallengeReply { string nonce = 1; string message = 2; }
+message LoginVerifyRequest { string address = 1; string signature = 2; string invite_code = 3; }
+message LoginVerifyReply { string access_token = 1; uint64 user_id = 2; }
+message GetMeRequest {}
+message GetMeReply { uint64 user_id = 1; string address = 2; string account_balance = 3; string withdrawable_balance = 4; }
+message CreateLocationRequest { string amount = 1; }
+message CreateLocationReply { uint64 location_id = 1; }
+message ListLocationsRequest {}
+message ListLocationsReply { repeated LocationItem items = 1; }
+message LocationItem {
+  uint64 id = 1;
+  string amount = 2;
+  string status = 3;
+  string accumulated = 4;
+  string exit_target = 5;
+}
+message CreateWithdrawRequest { string amount = 1; repeated uint64 location_ids = 2; }
+message CreateWithdrawReply { uint64 withdraw_id = 1; }
+message ListWithdrawsRequest {}
+message ListWithdrawsReply { repeated WithdrawItem items = 1; }
+message WithdrawItem { uint64 id = 1; string amount = 2; string status = 3; }
+message ListLedgerRequest {}
+message ListLedgerReply { repeated LedgerItem items = 1; }
+message LedgerItem { string entry_type = 1; string amount = 2; string balance_kind = 3; }
+message AdminRechargeRequest { string address = 1; string amount = 2; }
+message AdminRechargeReply {}
+message AdminListWithdrawsRequest { string status = 1; }
+message AdminListWithdrawsReply { repeated WithdrawItem items = 1; }
+message AdminApproveWithdrawRequest { uint64 id = 1; }
+message AdminApproveWithdrawReply {}
+message AdminRejectWithdrawRequest { uint64 id = 1; string remark = 2; }
+message AdminRejectWithdrawReply {}
+message AdminListBusinessConfigsRequest {}
+message AdminListBusinessConfigsReply { repeated BusinessConfigItem items = 1; }
+message BusinessConfigItem { int64 id = 1; string config_key = 2; string name = 3; string value = 4; }
+message AdminUpdateBusinessConfigRequest { int64 id = 1; string value = 2; }
+message AdminUpdateBusinessConfigReply {}
+message AdminRunSettleRequest {}
+message AdminRunSettleReply { string message = 1; }
