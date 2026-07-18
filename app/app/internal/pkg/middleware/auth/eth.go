@@ -70,7 +70,7 @@ type JWTIssuer struct {
 
 func NewTokenIssuer(authConf *conf.Auth) biz.TokenIssuer {
 	key := []byte("change-me")
-	ttl := 72 * time.Hour
+	ttl := 24 * time.Hour
 	if authConf != nil {
 		if authConf.JWTKey != "" {
 			key = []byte(authConf.JWTKey)

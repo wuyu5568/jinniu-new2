@@ -409,7 +409,7 @@ func issueUserJWT(uid uint64, addr string) (string, error) {
 	claims := jwt.MapClaims{
 		"uid":  uid,
 		"addr": addr,
-		"exp":  now.Add(72 * time.Hour).Unix(),
+		"exp":  now.Add(24 * time.Hour).Unix(),
 		"iat":  now.Unix(),
 		"sub":  fmt.Sprintf("%d", uid),
 	}
