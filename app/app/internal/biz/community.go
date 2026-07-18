@@ -140,6 +140,32 @@ type CommunityRewardSplit struct {
 	Peer decimal.Decimal
 }
 
+const (
+	CommunityLineBase = "base"
+	CommunityLinePeer = "peer"
+)
+
+// StaticPiece is one order's static yield within a settle run (for ledger source buy/rate).
+type StaticPiece struct {
+	UserID      uint64
+	OrderID     uint64
+	Yield       decimal.Decimal
+	BuyAmount   decimal.Decimal
+	RatePercent decimal.Decimal // e.g. 0.75
+}
+
+// CommunityRewardLine is one per-source community / peer credit (for ledger split).
+type CommunityRewardLine struct {
+	SourceUserID   uint64
+	SourceOrderID  uint64
+	Kind           string // CommunityLineBase | CommunityLinePeer
+	Amount         decimal.Decimal
+	SourceStatic   decimal.Decimal
+	SourceBuy      decimal.Decimal
+	SourceRatePct  decimal.Decimal // e.g. 0.75
+	GapRate        decimal.Decimal // base: differential fraction; peer: peer pool rate
+}
+
 // CalcCommunityBase computes 社区基础奖 (级差 only) for claimant.
 func CalcCommunityBase(
 	claimant uint64,
@@ -153,8 +179,6 @@ func CalcCommunityBase(
 }
 
 // CalcCommunityRewards computes 级差 + 小区同级平级 for claimant.
-// 同级且双方 ≥ min_peer_level：不跟该人算级差，改发其本人当日静态 × peer_pool_rate；
-// 其下级仍计级差，对照比例为路径上最靠近领取人的有等级档（跳过与领取人同级）。更高档仍整段断档。
 func CalcCommunityRewards(
 	claimant uint64,
 	children map[uint64][]uint64,
@@ -163,16 +187,58 @@ func CalcCommunityRewards(
 	personal map[uint64]decimal.Decimal,
 	todayStatic map[uint64]decimal.Decimal,
 ) CommunityRewardSplit {
+	out := CommunityRewardSplit{}
+	for _, line := range ListCommunityRewardLines(claimant, children, parent, levels, personal, todayStatic) {
+		switch line.Kind {
+		case CommunityLineBase:
+			out.Base = out.Base.Add(line.Amount)
+		case CommunityLinePeer:
+			out.Peer = out.Peer.Add(line.Amount)
+		}
+	}
+	out.Base = out.Base.Round(8)
+	out.Peer = out.Peer.Round(8)
+	return out
+}
+
+// ListCommunityRewardLines returns per-source 级差 / 平级 lines (user-aggregated static).
+func ListCommunityRewardLines(
+	claimant uint64,
+	children map[uint64][]uint64,
+	parent map[uint64]uint64,
+	levels map[uint64]int,
+	personal map[uint64]decimal.Decimal,
+	todayStatic map[uint64]decimal.Decimal,
+) []CommunityRewardLine {
+	pieces := make(map[uint64][]StaticPiece, len(todayStatic))
+	for uid, s := range todayStatic {
+		if s.IsPositive() {
+			pieces[uid] = []StaticPiece{{UserID: uid, Yield: s}}
+		}
+	}
+	return ListCommunityRewardLinesFromPieces(claimant, children, parent, levels, personal, pieces)
+}
+
+// ListCommunityRewardLinesFromPieces returns 级差 / 平级 lines per source order static piece.
+// 同级且双方 ≥ min_peer_level：不跟该人算级差，改发其本人当日静态 × peer_pool_rate；
+// 其下级仍计级差，对照比例为路径上最靠近领取人的有等级档（跳过与领取人同级）。更高档仍整段断档。
+func ListCommunityRewardLinesFromPieces(
+	claimant uint64,
+	children map[uint64][]uint64,
+	parent map[uint64]uint64,
+	levels map[uint64]int,
+	personal map[uint64]decimal.Decimal,
+	pieces map[uint64][]StaticPiece,
+) []CommunityRewardLine {
 	selfLevel := levels[claimant]
 	ru := RateForLevel(selfLevel)
-	out := CommunityRewardSplit{}
 	if !ru.IsPositive() {
-		return out
+		return nil
 	}
 
 	legs := children[claimant]
 	if len(legs) == 0 {
-		return out
+		return nil
 	}
 	legVols := make([]decimal.Decimal, len(legs))
 	for i, leg := range legs {
@@ -182,8 +248,7 @@ func CalcCommunityRewards(
 	peerRate := GetActiveParams().peerPoolRateDec()
 	claimantPeerOK := PeerEligible(selfLevel)
 
-	base := decimal.Zero
-	peer := decimal.Zero
+	var lines []CommunityRewardLine
 	for i, legRoot := range legs {
 		if i == maxIdx {
 			continue
@@ -193,25 +258,49 @@ func CalcCommunityRewards(
 			if underCommunityBreak(x, claimant, selfLevel, parent, levels) {
 				continue
 			}
-			s := todayStatic[x]
-			if !s.IsPositive() {
-				continue
-			}
-			lv := levels[x]
-			if lv == selfLevel && claimantPeerOK && PeerEligible(lv) {
-				peer = peer.Add(s.Mul(peerRate))
-				continue
-			}
-			govRate := nearestGradedRateBelowClaimant(x, claimant, selfLevel, parent, levels)
-			diff := ru.Sub(govRate)
-			if diff.IsPositive() {
-				base = base.Add(s.Mul(diff))
+			for _, piece := range pieces[x] {
+				s := piece.Yield
+				if !s.IsPositive() {
+					continue
+				}
+				lv := levels[x]
+				if lv == selfLevel && claimantPeerOK && PeerEligible(lv) {
+					amt := s.Mul(peerRate).Round(8)
+					if amt.IsPositive() {
+						lines = append(lines, CommunityRewardLine{
+							SourceUserID:  x,
+							SourceOrderID: piece.OrderID,
+							Kind:          CommunityLinePeer,
+							Amount:        amt,
+							SourceStatic:  s,
+							SourceBuy:     piece.BuyAmount,
+							SourceRatePct: piece.RatePercent,
+							GapRate:       peerRate,
+						})
+					}
+					continue
+				}
+				govRate := nearestGradedRateBelowClaimant(x, claimant, selfLevel, parent, levels)
+				diff := ru.Sub(govRate)
+				if diff.IsPositive() {
+					amt := s.Mul(diff).Round(8)
+					if amt.IsPositive() {
+						lines = append(lines, CommunityRewardLine{
+							SourceUserID:  x,
+							SourceOrderID: piece.OrderID,
+							Kind:          CommunityLineBase,
+							Amount:        amt,
+							SourceStatic:  s,
+							SourceBuy:     piece.BuyAmount,
+							SourceRatePct: piece.RatePercent,
+							GapRate:       diff,
+						})
+					}
+				}
 			}
 		}
 	}
-	out.Base = base.Round(8)
-	out.Peer = peer.Round(8)
-	return out
+	return lines
 }
 
 // nearestGradedRateBelowClaimant walks from node up to claimant and returns the rate of the

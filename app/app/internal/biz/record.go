@@ -443,6 +443,27 @@ func (uc *RecordUseCase) SumActiveAmount(ctx context.Context, userID uint64) (de
 	return uc.locations.SumActiveByUser(ctx, userID)
 }
 
+// SumActiveExitRemaining sums (exit_target - accumulated) across active orders.
+func (uc *RecordUseCase) SumActiveExitRemaining(ctx context.Context, userID uint64) (decimal.Decimal, error) {
+	locs, err := uc.locations.ListByUser(ctx, userID, OrderStatusActive)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	sum := decimal.Zero
+	for _, loc := range locs {
+		room := loc.ExitTarget.Sub(loc.Accumulated)
+		if room.IsPositive() {
+			sum = sum.Add(room)
+		}
+	}
+	return sum, nil
+}
+
+// GetLocationByID returns a subscription order by id.
+func (uc *RecordUseCase) GetLocationByID(ctx context.Context, id uint64) (*Location, error) {
+	return uc.locations.FindByID(ctx, id)
+}
+
 // SumLocationAmount sums all location amounts for a user (active + exited).
 func (uc *RecordUseCase) SumLocationAmount(ctx context.Context, userID uint64) (decimal.Decimal, error) {
 	return uc.locations.SumAmountByUser(ctx, userID)
@@ -546,6 +567,7 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 	}
 	result := &SettleResult{}
 	todayStatic := map[uint64]decimal.Decimal{}
+	staticPieces := map[uint64][]StaticPiece{}
 	for _, snap := range orders {
 		// Re-load: earlier orders' 代数 may have filled/exited this row already.
 		order, err := uc.locations.FindByID(ctx, snap.ID)
@@ -570,7 +592,8 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 		}
 		// Extract turn only flipped direction; yield still uses current rate, then advance as usual.
 		order.RateTurnPending = false
-		yield := CalcStaticYield(order.Amount, order.RatePercent)
+		rateUsed := order.RatePercent
+		yield := CalcStaticYield(order.Amount, rateUsed)
 		if !yield.IsPositive() {
 			if _, err := uc.locations.Update(ctx, order); err != nil {
 				return nil, err
@@ -585,7 +608,12 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 			return nil, err
 		}
 		oid := order.ID
-		if err := uc.writeLedger(ctx, order.UserID, &oid, LedgerStatic, yield, "static yield"); err != nil {
+		staticVip := 0
+		if su, err := uc.users.FindByID(ctx, order.UserID); err == nil && su != nil {
+			staticVip = int(su.CommunityLevel)
+		}
+		if err := uc.writeLedger(ctx, order.UserID, &oid, LedgerStatic, yield,
+			fmt.Sprintf("static yield vip=%d", staticVip)); err != nil {
 			return nil, err
 		}
 
@@ -602,8 +630,15 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 		}
 		result.SettledCount++
 		todayStatic[order.UserID] = todayStatic[order.UserID].Add(yield)
+		staticPieces[order.UserID] = append(staticPieces[order.UserID], StaticPiece{
+			UserID:      order.UserID,
+			OrderID:     order.ID,
+			Yield:       yield,
+			BuyAmount:   order.Amount,
+			RatePercent: rateUsed,
+		})
 
-		n, err := uc.payGenerationRewards(ctx, order.UserID, yield)
+		n, err := uc.payGenerationRewards(ctx, order.UserID, yield, order.Amount, rateUsed)
 		if err != nil {
 			return nil, err
 		}
@@ -622,7 +657,7 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 		contrib[uid] = y
 	}
 
-	cc, pc, err := uc.settleCommunity(ctx, contrib)
+	cc, pc, err := uc.settleCommunity(ctx, contrib, staticPieces)
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +666,7 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 	return result, nil
 }
 
-func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[uint64]decimal.Decimal) (communityPaid, peerPaid int, err error) {
+func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[uint64]decimal.Decimal, staticPieces map[uint64][]StaticPiece) (communityPaid, peerPaid int, err error) {
 	users, err := uc.users.ListAll(ctx)
 	if err != nil {
 		return 0, 0, err
@@ -679,31 +714,66 @@ func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[ui
 		}
 	}
 
+	addrByID := make(map[uint64]string, len(users))
 	for _, u := range users {
-		split := CalcCommunityRewards(u.ID, children, parent, levels, personal, todayStatic)
-		if split.Base.IsPositive() {
-			applied, err := uc.creditOrderAcceleration(ctx, u.ID, split.Base, LedgerCommunityBase, "community base")
-			if err != nil {
-				return communityPaid, peerPaid, err
-			}
-			if applied.IsPositive() {
-				communityPaid++
+		addrByID[u.ID] = u.Address
+	}
+	// Prefer per-order pieces for ledger source buy/rate; fall back to user-aggregated static.
+	pieces := staticPieces
+	if len(pieces) == 0 {
+		pieces = make(map[uint64][]StaticPiece, len(todayStatic))
+		for uid, s := range todayStatic {
+			if s.IsPositive() {
+				pieces[uid] = []StaticPiece{{UserID: uid, Yield: s}}
 			}
 		}
-		if split.Peer.IsPositive() {
-			applied, err := uc.creditOrderAcceleration(ctx, u.ID, split.Peer, LedgerPeer, "peer reward")
+	} else {
+		// Drop reward-locked users' pieces (contrib already filtered todayStatic).
+		filtered := make(map[uint64][]StaticPiece, len(pieces))
+		for uid, ps := range pieces {
+			if _, ok := todayStatic[uid]; ok {
+				filtered[uid] = ps
+			}
+		}
+		pieces = filtered
+	}
+	for _, u := range users {
+		lines := ListCommunityRewardLinesFromPieces(u.ID, children, parent, levels, personal, pieces)
+		for _, line := range lines {
+			src := addrByID[line.SourceUserID]
+			var entryType, remark string
+			vip := levels[u.ID]
+			fromVip := levels[line.SourceUserID]
+			switch line.Kind {
+			case CommunityLinePeer:
+				entryType = LedgerPeer
+				remark = fmt.Sprintf("peer reward from=%s static=%s rate=%s buy=%s ratePct=%s vip=%d fromVip=%d",
+					src, line.SourceStatic.String(), line.GapRate.String(), line.SourceBuy.String(), line.SourceRatePct.String(),
+					vip, fromVip)
+			default:
+				entryType = LedgerCommunityBase
+				remark = fmt.Sprintf("community base from=%s static=%s gap=%s buy=%s ratePct=%s vip=%d fromVip=%d",
+					src, line.SourceStatic.String(), line.GapRate.String(), line.SourceBuy.String(), line.SourceRatePct.String(),
+					vip, fromVip)
+			}
+			applied, err := uc.creditOrderAcceleration(ctx, u.ID, line.Amount, entryType, remark)
 			if err != nil {
 				return communityPaid, peerPaid, err
 			}
-			if applied.IsPositive() {
+			if !applied.IsPositive() {
+				continue
+			}
+			if entryType == LedgerPeer {
 				peerPaid++
+			} else {
+				communityPaid++
 			}
 		}
 	}
 	return communityPaid, peerPaid, nil
 }
 
-func (uc *RecordUseCase) payGenerationRewards(ctx context.Context, fromUserID uint64, staticYield decimal.Decimal) (int, error) {
+func (uc *RecordUseCase) payGenerationRewards(ctx context.Context, fromUserID uint64, staticYield, buyAmount, ratePct decimal.Decimal) (int, error) {
 	reward := CalcGenerationReward(staticYield)
 	if !reward.IsPositive() {
 		return 0, nil
@@ -731,7 +801,10 @@ func (uc *RecordUseCase) payGenerationRewards(ctx context.Context, fromUserID ui
 			return paid, err
 		}
 		if CanEarnGeneration(directs, depth) {
-			remark := fmt.Sprintf("generation from=%s depth=%d", user.Address, depth)
+			genRate := GetActiveParams().GenerationRate
+			remark := fmt.Sprintf("generation from=%s depth=%d static=%s rate=%s buy=%s ratePct=%s vip=%d fromVip=%d",
+				user.Address, depth, staticYield.String(), genRate, buyAmount.String(), ratePct.String(),
+				int(inviter.CommunityLevel), int(user.CommunityLevel))
 			applied, err := uc.creditOrderAcceleration(ctx, inviterID, reward, LedgerGeneration, remark)
 			if err != nil {
 				return paid, err

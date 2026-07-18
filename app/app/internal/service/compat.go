@@ -504,6 +504,60 @@ func parseGenerationRemark(remark string) (address, depth string) {
 	return address, depth
 }
 
+// parseLedgerKV reads key=value tokens from a ledger remark.
+func parseLedgerKV(remark, key string) string {
+	if remark == "" || key == "" {
+		return ""
+	}
+	prefix := key + "="
+	for _, p := range strings.Fields(remark) {
+		if strings.HasPrefix(p, prefix) {
+			return strings.TrimPrefix(p, prefix)
+		}
+	}
+	return ""
+}
+
+func formatStaticRate(amount, buyAmount decimal.Decimal) string {
+	if !buyAmount.IsPositive() || !amount.IsPositive() {
+		return ""
+	}
+	return amount.Div(buyAmount).Mul(decimal.NewFromInt(100)).Round(4).String()
+}
+
+func formatGapRate(amount, sourceStatic decimal.Decimal, gapFromRemark string) string {
+	if gapFromRemark != "" {
+		if g, err := decimal.NewFromString(gapFromRemark); err == nil && g.IsPositive() {
+			return formatRateFraction(g)
+		}
+	}
+	if sourceStatic.IsPositive() && amount.IsPositive() {
+		return formatRateFraction(amount.Div(sourceStatic))
+	}
+	return ""
+}
+
+func formatRateFraction(frac decimal.Decimal) string {
+	if !frac.IsPositive() {
+		return ""
+	}
+	return frac.Mul(decimal.NewFromInt(100)).Round(2).StringFixed(2) + "%"
+}
+
+func buildCalcDetail(sourceStatic, applyRate, amount string) string {
+	if sourceStatic == "" || applyRate == "" || amount == "" {
+		return ""
+	}
+	return sourceStatic + " × " + applyRate + " = " + amount
+}
+
+func formatVipLabel(vipTok string) string {
+	if vipTok == "" {
+		return ""
+	}
+	return "V" + vipTok
+}
+
 func reqTypeToEntryType(reqType string) string {
 	switch reqType {
 	case "2":
@@ -727,6 +781,8 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 	out := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		activeSum, _ := s.record.SumActiveAmount(r.Context(), u.ID)
+		exitRemain, _ := s.record.SumActiveExitRemaining(r.Context(), u.ID)
+		teamTotal, maxLeg, smallArea, _ := s.record.AreaVolumes(r.Context(), u.ID)
 		inviteAddr := ""
 		if u.InviterID != nil {
 			if inv, err := s.record.GetUserByID(r.Context(), *u.InviterID); err == nil {
@@ -751,6 +807,7 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 			"createdAt":           u.CreatedAt.Format("2006-01-02 15:04:05"),
 			"address":             u.Address,
 			"amountUsdtCurrent":   decStr(activeSum),
+			"exitRemain":          decStr(exitRemain),
 			"bAmount":             zeroStr(),
 			"amountUsdtGet":       decStrFloor4(u.WithdrawableBalance),
 			"amountUsdtTwo":       zeroStr(),
@@ -759,9 +816,10 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 			"bAmountTwo":          zeroStr(),
 			"perDayAmount":        zeroStr(),
 			"out":                 "0",
-			"areaTotal":           decStr(u.CommunityVolume),
+			"areaTeam":            decStr(teamTotal),
+			"areaMax":             decStr(maxLeg),
+			"areaTotal":           decStr(smallArea),
 			"areaMin":             zeroStr(),
-			"areaMax":             zeroStr(),
 			"vip":                 strconv.Itoa(int(u.CommunityLevel)),
 			"vipLocked":           vipLocked,
 			"historyRecommend":    strconv.Itoa(directs),
@@ -1011,15 +1069,91 @@ func (s *AppService) CompatAdminRewardList(w http.ResponseWriter, r *http.Reques
 			addr = u.Address
 		}
 		srcAddr, depth := parseGenerationRemark(e.Remark)
+		if srcAddr == "" {
+			srcAddr = parseLedgerKV(e.Remark, "from")
+		}
+		buyAmount := ""
+		staticRate := ""
+		gapRate := ""
+		sourceStatic := ""
+		applyRate := ""
+		calcDetail := ""
+		amtStr := e.Amount.String()
+		switch e.EntryType {
+		case biz.LedgerStatic:
+			if e.OrderID != nil {
+				if loc, err := s.record.GetLocationByID(r.Context(), *e.OrderID); err == nil && loc != nil {
+					buyAmount = loc.Amount.String()
+				}
+			}
+			if buyAmount != "" {
+				if buy, err := decimal.NewFromString(buyAmount); err == nil {
+					staticRate = formatStaticRate(e.Amount, buy)
+				}
+			}
+			if staticRate != "" && buyAmount != "" {
+				calcDetail = buyAmount + " × " + staticRate + "% = " + amtStr
+			}
+		case biz.LedgerCommunityBase, biz.LedgerGeneration, biz.LedgerPeer:
+			// 认购金额 / 静态利率 = 来源那笔静态对应的认购与利率（非领取人填单）
+			sourceStatic = parseLedgerKV(e.Remark, "static")
+			buyAmount = parseLedgerKV(e.Remark, "buy")
+			ratePctTok := parseLedgerKV(e.Remark, "ratePct")
+			if ratePctTok != "" {
+				staticRate = ratePctTok
+			} else if sourceStatic != "" && buyAmount != "" {
+				if ss, err1 := decimal.NewFromString(sourceStatic); err1 == nil {
+					if buy, err2 := decimal.NewFromString(buyAmount); err2 == nil {
+						staticRate = formatStaticRate(ss, buy)
+					}
+				}
+			}
+			switch e.EntryType {
+			case biz.LedgerCommunityBase:
+				gapTok := parseLedgerKV(e.Remark, "gap")
+				srcStaticDec := decimal.Zero
+				if sourceStatic != "" {
+					srcStaticDec, _ = decimal.NewFromString(sourceStatic)
+				}
+				gapRate = formatGapRate(e.Amount, srcStaticDec, gapTok)
+				applyRate = gapRate
+			case biz.LedgerGeneration:
+				rateTok := parseLedgerKV(e.Remark, "rate")
+				if rateTok == "" {
+					rateTok = biz.GetActiveParams().GenerationRate
+				}
+				if rdec, err := decimal.NewFromString(rateTok); err == nil {
+					applyRate = formatRateFraction(rdec)
+				}
+			case biz.LedgerPeer:
+				rateTok := parseLedgerKV(e.Remark, "rate")
+				if rdec, err := decimal.NewFromString(rateTok); err == nil {
+					applyRate = formatRateFraction(rdec)
+				}
+			}
+			if sourceStatic != "" && applyRate != "" {
+				calcDetail = buildCalcDetail(sourceStatic, applyRate, amtStr)
+			}
+		}
+		vip := formatVipLabel(parseLedgerKV(e.Remark, "vip"))
+		fromVip := formatVipLabel(parseLedgerKV(e.Remark, "fromVip"))
 		rewards = append(rewards, map[string]any{
-			"createdAt":  e.CreatedAt.Format("2006-01-02 15:04:05"),
-			"amount":     e.Amount.String(),
-			"address":    addr,
-			"reason":     ledgerReasonCompat(e.EntryType),
-			"name":       ledgerNameCompat(e.EntryType),
-			"addressTwo": srcAddr,
-			"num":        depth,
-			"remark":     e.Remark,
+			"createdAt":     e.CreatedAt.Format("2006-01-02 15:04:05"),
+			"amount":        amtStr,
+			"buyAmount":     buyAmount,
+			"staticRate":    staticRate,
+			"gapRate":       gapRate,
+			"sourceStatic":  sourceStatic,
+			"applyRate":     applyRate,
+			"calcDetail":    calcDetail,
+			"address":       addr,
+			"vip":           vip,
+			"reason":        ledgerReasonCompat(e.EntryType),
+			"name":          ledgerNameCompat(e.EntryType),
+			"addressTwo":    srcAddr,
+			"fromVip":       fromVip,
+			"num":           depth,
+			"remark":        e.Remark,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rewards": rewards, "count": strconv.Itoa(total)})
