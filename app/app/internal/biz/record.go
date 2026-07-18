@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,17 +25,18 @@ const (
 
 // Location is a subscription order (persisted as locations).
 type Location struct {
-	ID            uint64
-	UserID        uint64
-	Amount        decimal.Decimal
-	Multiplier    decimal.Decimal
-	ExitTarget    decimal.Decimal
-	Accumulated   decimal.Decimal
-	Status        string
-	RatePercent   decimal.Decimal
-	RateDirection string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID              uint64
+	UserID          uint64
+	Amount          decimal.Decimal
+	Multiplier      decimal.Decimal
+	ExitTarget      decimal.Decimal
+	Accumulated     decimal.Decimal
+	Status          string
+	RatePercent     decimal.Decimal
+	RateDirection   string
+	RateTurnPending bool // extract flipped direction once this settle cycle; cleared on next settle
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // LocationRepo CRUD for 认购订单.
@@ -267,18 +269,30 @@ func (uc *RecordUseCase) ListLocations(ctx context.Context, userID uint64, statu
 	return uc.locations.ListByUser(ctx, userID, status)
 }
 
-// CreateWithdraw submits an extract request.
-// orderIDs are ignored: rate turnaround applies to all active locations at approve time.
+// ensurePayoutReady rejects extract when on-chain payout cannot run (ADR 0012).
+func (uc *RecordUseCase) ensurePayoutReady(credited decimal.Decimal) error {
+	if !uc.payoutCfg.Enabled {
+		return ErrPayoutDisabled
+	}
+	if !uc.payoutCfg.MaxUSDT.IsPositive() {
+		return ErrPayoutMaxRequired
+	}
+	if strings.TrimSpace(uc.payoutCfg.RPC) == "" ||
+		strings.TrimSpace(uc.payoutCfg.USDT) == "" ||
+		strings.TrimSpace(uc.payoutCfg.HotWalletKey) == "" {
+		return ErrPayoutNotConfigured
+	}
+	if credited.GreaterThan(uc.payoutCfg.MaxUSDT) {
+		return ErrPayoutAboveMax
+	}
+	return nil
+}
+
+// CreateWithdraw submits extract: deduct → rate turn → rewarded → async payout.
+// No admin review; cancel disabled after confirm (ADR 0012).
 func (uc *RecordUseCase) CreateWithdraw(ctx context.Context, userID uint64, amount decimal.Decimal, _ []uint64) (*Withdraw, error) {
 	if !amount.IsPositive() {
 		return nil, ErrInvalidAmount
-	}
-	minWd, err := decimal.NewFromString(GetActiveParams().MinWithdrawAmount)
-	if err != nil || !minWd.IsPositive() {
-		minWd = decimal.NewFromInt(10)
-	}
-	if amount.LessThan(minWd) {
-		return nil, ErrBelowMinWithdraw
 	}
 	user, err := uc.users.FindByID(ctx, userID)
 	if err != nil {
@@ -291,97 +305,93 @@ func (uc *RecordUseCase) CreateWithdraw(ctx context.Context, userID uint64, amou
 	feeRate := decimal.RequireFromString(GetActiveParams().ExtractFeeRate)
 	fee := amount.Mul(feeRate).Round(8)
 	credited := amount.Sub(fee)
+	if err := uc.ensurePayoutReady(credited); err != nil {
+		return nil, err
+	}
 
 	if err := uc.balances.SubWithdrawableBalance(ctx, userID, amount); err != nil {
 		return nil, err
 	}
 
+	now := time.Now()
 	created, err := uc.withdraws.Create(ctx, &Withdraw{
 		UserID:         userID,
 		Amount:         amount,
 		FeeAmount:      fee,
 		CreditedAmount: credited,
 		OrderIDs:       nil,
-		Status:         WithdrawPending,
+		Status:         WithdrawRewarded,
+		ReviewedAt:     &now,
 	})
 	if err != nil {
 		_ = uc.balances.AddWithdrawableBalance(ctx, userID, amount)
 		return nil, err
 	}
-	return created, nil
-}
 
-// CancelWithdraw cancels a pending request and refunds withdrawable.
-func (uc *RecordUseCase) CancelWithdraw(ctx context.Context, userID, id uint64) (*Withdraw, error) {
-	w, err := uc.withdraws.FindByID(ctx, id)
-	if err != nil || w == nil || w.UserID != userID {
-		return nil, ErrWithdrawNotFound
-	}
-	ok, err := uc.withdraws.CasUpdateStatus(ctx, id, WithdrawPending, WithdrawCancelled, "")
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrWithdrawConflict
-	}
-	if err := uc.balances.AddWithdrawableBalance(ctx, userID, w.Amount); err != nil {
-		return nil, err
-	}
-	w.Status = WithdrawCancelled
-	return w, nil
-}
-
-// ApproveWithdraw confirms pending request → rewarded (awaiting on-chain payout), turns rates.
-func (uc *RecordUseCase) ApproveWithdraw(ctx context.Context, id uint64) (*Withdraw, error) {
-	w, err := uc.withdraws.FindByID(ctx, id)
-	if err != nil || w == nil {
-		return nil, ErrWithdrawNotFound
-	}
-	ok, err := uc.withdraws.CasUpdateStatus(ctx, id, WithdrawPending, WithdrawRewarded, "")
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrWithdrawConflict
-	}
-	locs, err := uc.locations.ListByUser(ctx, w.UserID, OrderStatusActive)
+	locs, err := uc.locations.ListByUser(ctx, userID, OrderStatusActive)
 	if err != nil {
 		return nil, err
 	}
 	for _, loc := range locs {
+		if loc.RateTurnPending {
+			continue
+		}
 		loc.RatePercent, loc.RateDirection = ApplyExtractRateTurn(loc.RatePercent, loc.RateDirection)
+		loc.RateTurnPending = true
 		if _, err := uc.locations.Update(ctx, loc); err != nil {
 			return nil, err
 		}
 	}
-	_ = uc.writeLedger(ctx, w.UserID, nil, LedgerExtract, w.Amount.Neg(), "withdraw approved fee="+w.FeeAmount.String())
-	w.Status = WithdrawRewarded
-	now := time.Now()
-	w.ReviewedAt = &now
-	return w, nil
+	_ = uc.writeLedger(ctx, userID, nil, LedgerExtract, amount.Neg(), "withdraw fee="+fee.String())
+
+	wdID := created.ID
+	go func() {
+		pctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if _, err := uc.ProcessWithdrawPayout(pctx, wdID); err != nil {
+			log.Printf("async payout withdraw_id=%d: %v", wdID, err)
+		}
+	}()
+
+	return created, nil
 }
 
-// RejectWithdraw rejects pending request and refunds withdrawable.
+// CancelWithdraw is disabled (ADR 0012): confirm is final.
+func (uc *RecordUseCase) CancelWithdraw(ctx context.Context, userID, id uint64) (*Withdraw, error) {
+	return nil, ErrWithdrawCancelDisabled
+}
+
+// ApproveWithdraw is disabled (ADR 0012): no admin review.
+func (uc *RecordUseCase) ApproveWithdraw(ctx context.Context, id uint64) (*Withdraw, error) {
+	return nil, ErrWithdrawReviewDisabled
+}
+
+// RejectWithdraw is disabled (ADR 0012): no admin review.
 func (uc *RecordUseCase) RejectWithdraw(ctx context.Context, id uint64, remark string) (*Withdraw, error) {
-	w, err := uc.withdraws.FindByID(ctx, id)
-	if err != nil || w == nil {
-		return nil, ErrWithdrawNotFound
-	}
-	ok, err := uc.withdraws.CasUpdateStatus(ctx, id, WithdrawPending, WithdrawRejected, remark)
+	return nil, ErrWithdrawReviewDisabled
+}
+
+// CancelAllPendingWithdraws refunds legacy pending rows (one-shot migration for ADR 0012).
+func (uc *RecordUseCase) CancelAllPendingWithdraws(ctx context.Context) (int, error) {
+	list, err := uc.withdraws.ListFiltered(ctx, WithdrawPending, 0)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if !ok {
-		return nil, ErrWithdrawConflict
+	n := 0
+	for _, w := range list {
+		ok, err := uc.withdraws.CasUpdateStatus(ctx, w.ID, WithdrawPending, WithdrawCancelled, "adr0012 migrate")
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			continue
+		}
+		if err := uc.balances.AddWithdrawableBalance(ctx, w.UserID, w.Amount); err != nil {
+			return n, err
+		}
+		n++
 	}
-	if err := uc.balances.AddWithdrawableBalance(ctx, w.UserID, w.Amount); err != nil {
-		return nil, err
-	}
-	w.Status = WithdrawRejected
-	w.Remark = remark
-	now := time.Now()
-	w.ReviewedAt = &now
-	return w, nil
+	return n, nil
 }
 
 // ListWithdraws lists user withdraws.
@@ -551,14 +561,20 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 		room := order.ExitTarget.Sub(order.Accumulated)
 		if !room.IsPositive() {
 			order.Status = OrderStatusExited
+			order.RateTurnPending = false
 			if _, err := uc.locations.Update(ctx, order); err != nil {
 				return nil, err
 			}
 			result.ExitedCount++
 			continue
 		}
-		yield := CalcStaticYield(order.ExitTarget, order.RatePercent)
+		// Extract turn only flipped direction; yield still uses current rate, then advance as usual.
+		order.RateTurnPending = false
+		yield := CalcStaticYield(order.Amount, order.RatePercent)
 		if !yield.IsPositive() {
+			if _, err := uc.locations.Update(ctx, order); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if yield.GreaterThan(room) {
@@ -576,6 +592,7 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 		if order.Accumulated.GreaterThanOrEqual(order.ExitTarget) {
 			order.Accumulated = order.ExitTarget
 			order.Status = OrderStatusExited
+			order.RateTurnPending = false
 			result.ExitedCount++
 		} else {
 			order.RatePercent, order.RateDirection = AdvanceRate(order.RatePercent, order.RateDirection)
@@ -648,6 +665,13 @@ func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[ui
 			legVols[i] = SubtreeVolume(leg, children, personal)
 		}
 		vol := SmallAreaVolume(legVols)
+		if u.CommunityLevelLocked {
+			levels[u.ID] = int(u.CommunityLevel)
+			if err := uc.users.UpdateCommunityVolume(ctx, u.ID, vol); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
 		lv := LevelFromVolume(vol)
 		levels[u.ID] = lv
 		if err := uc.users.UpdateCommunity(ctx, u.ID, uint8(lv), vol); err != nil {
@@ -656,30 +680,24 @@ func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[ui
 	}
 
 	for _, u := range users {
-		base := CalcCommunityBase(u.ID, children, parent, levels, personal, todayStatic)
-		if !base.IsPositive() {
-			continue
+		split := CalcCommunityRewards(u.ID, children, parent, levels, personal, todayStatic)
+		if split.Base.IsPositive() {
+			applied, err := uc.creditOrderAcceleration(ctx, u.ID, split.Base, LedgerCommunityBase, "community base")
+			if err != nil {
+				return communityPaid, peerPaid, err
+			}
+			if applied.IsPositive() {
+				communityPaid++
+			}
 		}
-		applied, err := uc.creditOrderAcceleration(ctx, u.ID, base, LedgerCommunityBase, "community base")
-		if err != nil {
-			return communityPaid, peerPaid, err
-		}
-		if applied.IsPositive() {
-			communityPaid++
-		}
-	}
-
-	peers := CalcPeerRewards(children, parent, levels, personal, todayStatic)
-	for uid, amount := range peers {
-		if !amount.IsPositive() {
-			continue
-		}
-		applied, err := uc.creditOrderAcceleration(ctx, uid, amount, LedgerPeer, "peer reward")
-		if err != nil {
-			return communityPaid, peerPaid, err
-		}
-		if applied.IsPositive() {
-			peerPaid++
+		if split.Peer.IsPositive() {
+			applied, err := uc.creditOrderAcceleration(ctx, u.ID, split.Peer, LedgerPeer, "peer reward")
+			if err != nil {
+				return communityPaid, peerPaid, err
+			}
+			if applied.IsPositive() {
+				peerPaid++
+			}
 		}
 	}
 	return communityPaid, peerPaid, nil
@@ -725,34 +743,6 @@ func (uc *RecordUseCase) payGenerationRewards(ctx context.Context, fromUserID ui
 		current = inviter
 	}
 	return paid, nil
-}
-
-func (uc *RecordUseCase) creditDailyDividend(ctx context.Context, userID uint64, amount decimal.Decimal, entryType, remark string) error {
-	if !amount.IsPositive() {
-		return nil
-	}
-	if err := uc.balances.AddWithdrawableBalance(ctx, userID, amount); err != nil {
-		return err
-	}
-	var orderID *uint64
-	order, err := uc.locations.FindEarliestActive(ctx, userID)
-	if err != nil {
-		if !errors.Is(err, ErrLocationNotFound) {
-			return err
-		}
-	} else {
-		order.Accumulated = order.Accumulated.Add(amount)
-		if order.Accumulated.GreaterThanOrEqual(order.ExitTarget) {
-			order.Accumulated = order.ExitTarget
-			order.Status = OrderStatusExited
-		}
-		if _, err := uc.locations.Update(ctx, order); err != nil {
-			return err
-		}
-		oid := order.ID
-		orderID = &oid
-	}
-	return uc.writeLedger(ctx, userID, orderID, entryType, amount, remark)
 }
 
 // creditOrderAcceleration applies 代数/社区基础奖/平级：FIFO 填进行中认购单（进度+可提双记）。
@@ -822,7 +812,7 @@ func chunkAcceleration(accumulated, exitTarget, amount decimal.Decimal) (chunk, 
 	return chunk, room
 }
 
-// SetVIP sets community level (V0–V9) without changing volume.
+// SetVIP sets community level (V0–V9) and locks it so settle won't overwrite level.
 func (uc *RecordUseCase) SetVIP(ctx context.Context, userID uint64, level int) error {
 	if level < 0 || level > 9 {
 		return ErrInvalidAmount
@@ -830,7 +820,15 @@ func (uc *RecordUseCase) SetVIP(ctx context.Context, userID uint64, level int) e
 	if _, err := uc.users.FindByID(ctx, userID); err != nil {
 		return err
 	}
-	return uc.users.SetCommunityLevel(ctx, userID, uint8(level))
+	return uc.users.SetCommunityLevel(ctx, userID, uint8(level), true)
+}
+
+// UnlockVIP clears community level lock; next settle recomputes level from volume.
+func (uc *RecordUseCase) UnlockVIP(ctx context.Context, userID uint64) error {
+	if _, err := uc.users.FindByID(ctx, userID); err != nil {
+		return err
+	}
+	return uc.users.SetCommunityLevelLocked(ctx, userID, false)
 }
 
 // SetUserLock soft-deletes or restores a single user.
@@ -1183,39 +1181,6 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-// DepositNew 链上充值入账户余额（保留；新拉单优先 CreditChainDeposit）.
-func (uc *RecordUseCase) DepositNew(ctx context.Context, userId int64, pId int64, amount uint64, eth *EthUserRecord, system bool) error {
-	_ = pId
-	if amount == 0 || userId <= 0 {
-		return ErrInvalidAmount
-	}
-	uid := uint64(userId)
-	amt := decimal.NewFromInt(int64(amount))
-	if err := uc.balances.AddAccountBalance(ctx, uid, amt); err != nil {
-		return err
-	}
-	if uc.ledger != nil {
-		_ = uc.ledger.Create(ctx, &LedgerEntry{
-			UserID:      uid,
-			EntryType:   LedgerDeposit,
-			Amount:      amt,
-			BalanceKind: BalanceAccount,
-			Remark:      "chain deposit",
-		})
-	}
-	if !system && uc.ethUserRecord != nil && eth != nil {
-		eth.AmountTwo = amount
-		if eth.Amount == "" {
-			eth.Amount = strconv.FormatUint(amount, 10) + "000000000000000000"
-		}
-		if _, err := uc.ethUserRecord.CreateEthUserRecordListByHash(ctx, eth); err != nil {
-			fmt.Println(err, "CREATE_ETH_USER_RECORD", userId, amount)
-			return err
-		}
-	}
-	return nil
 }
 
 // GetUserByAddress 批量按地址查用户（小写键）.

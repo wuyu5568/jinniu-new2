@@ -16,30 +16,32 @@ func NewLocationRepo(d *Data) biz.LocationRepo { return &locationRepo{data: d} }
 
 func toBizLocation(m *LocationModel) *biz.Location {
 	return &biz.Location{
-		ID:            m.ID,
-		UserID:        m.UserID,
-		Amount:        m.Amount,
-		Multiplier:    m.Multiplier,
-		ExitTarget:    m.ExitTarget,
-		Accumulated:   m.Accumulated,
-		Status:        m.Status,
-		RatePercent:   m.RatePercent,
-		RateDirection: m.RateDirection,
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
+		ID:              m.ID,
+		UserID:          m.UserID,
+		Amount:          m.Amount,
+		Multiplier:      m.Multiplier,
+		ExitTarget:      m.ExitTarget,
+		Accumulated:     m.Accumulated,
+		Status:          m.Status,
+		RatePercent:     m.RatePercent,
+		RateDirection:   m.RateDirection,
+		RateTurnPending: m.RateTurnPending,
+		CreatedAt:       m.CreatedAt,
+		UpdatedAt:       m.UpdatedAt,
 	}
 }
 
 func (r *locationRepo) Create(ctx context.Context, loc *biz.Location) (*biz.Location, error) {
 	m := LocationModel{
-		UserID:        loc.UserID,
-		Amount:        loc.Amount,
-		Multiplier:    loc.Multiplier,
-		ExitTarget:    loc.ExitTarget,
-		Accumulated:   loc.Accumulated,
-		Status:        loc.Status,
-		RatePercent:   loc.RatePercent,
-		RateDirection: loc.RateDirection,
+		UserID:          loc.UserID,
+		Amount:          loc.Amount,
+		Multiplier:      loc.Multiplier,
+		ExitTarget:      loc.ExitTarget,
+		Accumulated:     loc.Accumulated,
+		Status:          loc.Status,
+		RatePercent:     loc.RatePercent,
+		RateDirection:   loc.RateDirection,
+		RateTurnPending: loc.RateTurnPending,
 	}
 	if err := r.data.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return nil, err
@@ -60,10 +62,11 @@ func (r *locationRepo) FindByID(ctx context.Context, id uint64) (*biz.Location, 
 
 func (r *locationRepo) Update(ctx context.Context, loc *biz.Location) (*biz.Location, error) {
 	res := r.data.db.WithContext(ctx).Model(&LocationModel{}).Where("id = ?", loc.ID).Updates(map[string]any{
-		"accumulated":    loc.Accumulated,
-		"status":         loc.Status,
-		"rate_percent":   loc.RatePercent,
-		"rate_direction": loc.RateDirection,
+		"accumulated":       loc.Accumulated,
+		"status":            loc.Status,
+		"rate_percent":      loc.RatePercent,
+		"rate_direction":    loc.RateDirection,
+		"rate_turn_pending": loc.RateTurnPending,
 	})
 	if res.Error != nil {
 		return nil, res.Error
@@ -157,7 +160,7 @@ func (r *locationRepo) ListAllPaged(ctx context.Context, address string, page, p
 	var rows []LocationModel
 	offset := (page - 1) * pageSize
 	if err := base.Session(&gorm.Session{}).
-		Select("locations.id, locations.user_id, locations.amount, locations.multiplier, locations.exit_target, locations.accumulated, locations.status, locations.rate_percent, locations.rate_direction, locations.created_at, locations.updated_at").
+		Select("locations.id, locations.user_id, locations.amount, locations.multiplier, locations.exit_target, locations.accumulated, locations.status, locations.rate_percent, locations.rate_direction, locations.rate_turn_pending, locations.created_at, locations.updated_at").
 		Order("locations.id DESC").Offset(offset).Limit(pageSize).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}

@@ -51,6 +51,11 @@ func newApp(cfg *conf.Bootstrap, d *data.Data) (*kratos.App, func(), error) {
 		MaxUSDT:      decimal.NewFromFloat(cfg.App.PayoutMaxUSDT),
 		CronExpr:     cfg.App.PayoutCron,
 	})
+	if n, err := recordUC.CancelAllPendingWithdraws(context.Background()); err != nil {
+		log.Printf("ADR0012 pending withdraw migrate: %v", err)
+	} else if n > 0 {
+		log.Printf("ADR0012: refunded and cancelled %d pending withdraw(s)", n)
+	}
 
 	svc := service.NewAppService(userUC, recordUC, &cfg.Auth, &cfg.App)
 	hs := server.NewHTTPServer(cfg, svc)

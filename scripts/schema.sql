@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
     withdrawable_balance DECIMAL(36, 8)  NOT NULL DEFAULT 0 COMMENT 'withdrawable balance',
     community_level      TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=none, 1-9 = V1-V9',
     community_volume     DECIMAL(36, 8)  NOT NULL DEFAULT 0 COMMENT 'community volume snapshot',
+    community_level_locked TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '1=admin-set level; settle only updates volume',
     disabled_at          DATETIME(3)     NULL COMMENT 'soft delete / disabled',
     reward_locked        TINYINT(1)      NOT NULL DEFAULT 0 COMMENT '1=stop as reward source for uplines',
     created_at           DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -32,20 +33,23 @@ CREATE TABLE IF NOT EXISTS login_challenges (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- locations = 认购订单; status: active | exited; rate_direction: up | down
+-- rate_turn_pending: extract flipped direction once this settle cycle; cleared on next settle
 CREATE TABLE IF NOT EXISTS locations (
-    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    user_id         BIGINT UNSIGNED NOT NULL,
-    amount          DECIMAL(36, 8)  NOT NULL,
-    multiplier      DECIMAL(3, 1)   NOT NULL,
-    exit_target     DECIMAL(36, 8)  NOT NULL,
-    accumulated     DECIMAL(36, 8)  NOT NULL DEFAULT 0,
-    status          VARCHAR(16)     NOT NULL DEFAULT 'active',
-    rate_percent    DECIMAL(5, 2)   NOT NULL DEFAULT 0.60,
-    rate_direction  VARCHAR(8)      NOT NULL DEFAULT 'up',
-    created_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    updated_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id            BIGINT UNSIGNED NOT NULL,
+    amount             DECIMAL(36, 8)  NOT NULL,
+    multiplier         DECIMAL(3, 1)   NOT NULL,
+    exit_target        DECIMAL(36, 8)  NOT NULL,
+    accumulated        DECIMAL(36, 8)  NOT NULL DEFAULT 0,
+    status             VARCHAR(16)     NOT NULL DEFAULT 'active',
+    rate_percent       DECIMAL(5, 2)   NOT NULL DEFAULT 0.60,
+    rate_direction     VARCHAR(8)      NOT NULL DEFAULT 'up',
+    rate_turn_pending  TINYINT(1)      NOT NULL DEFAULT 0,
+    created_at         DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at         DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     KEY idx_locations_user (user_id),
     KEY idx_locations_status (status),
+    KEY idx_locations_user_status (user_id, status),
     CONSTRAINT fk_locations_user FOREIGN KEY (user_id) REFERENCES users (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -73,6 +77,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     KEY idx_ledger_order (order_id),
     KEY idx_ledger_type (entry_type),
     KEY idx_ledger_created (created_at),
+    KEY idx_ledger_user_created (user_id, created_at),
     CONSTRAINT fk_ledger_user FOREIGN KEY (user_id) REFERENCES users (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -93,6 +98,7 @@ CREATE TABLE IF NOT EXISTS withdraws (
     KEY idx_withdraws_user (user_id),
     KEY idx_withdraws_status (status),
     KEY idx_withdraws_created (created_at),
+    KEY idx_withdraws_status_id (status, id),
     CONSTRAINT fk_withdraws_user FOREIGN KEY (user_id) REFERENCES users (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

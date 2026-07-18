@@ -36,7 +36,20 @@ func decStr(d decimal.Decimal) string {
 	return d.StringFixed(2)
 }
 
+// decStrFloor4 formats with 4 decimal places by truncating (no round).
+func decStrFloor4(d decimal.Decimal) string {
+	return d.Truncate(4).StringFixed(4)
+}
+
 func zeroStr() string { return "0.00" }
+
+func compatFail(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+}
+
+func compatFailMsg(w http.ResponseWriter, msg string) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": msg})
+}
 
 // --- User compat (taurus /api/app_server) ---
 
@@ -48,7 +61,7 @@ func (s *AppService) CompatEthAuthorize(w http.ResponseWriter, r *http.Request) 
 		Signature string `json:"signature"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+		compatFail(w)
 		return
 	}
 	sign := body.Sign
@@ -65,7 +78,7 @@ func (s *AppService) CompatEthAuthorize(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, biz.ErrInviteInvalid):
 			writeJSON(w, http.StatusOK, map[string]string{"status": "无效的推荐码"})
 		default:
-			writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+			compatFail(w)
 		}
 		return
 	}
@@ -107,10 +120,7 @@ func (s *AppService) CompatUserInfo(w http.ResponseWriter, r *http.Request) {
 func (s *AppService) buildTaurusUserInfo(ctx context.Context, user *biz.User) map[string]any {
 	params := biz.GetActiveParams()
 	withdrawRate := params.ExtractFeeRate
-	withdrawMin := params.MinWithdrawAmount
-	if withdrawMin == "" {
-		withdrawMin = "10"
-	}
+	withdrawMin := "0"
 
 	inviteAddr := ""
 	if user.InviterID != nil {
@@ -166,7 +176,7 @@ func (s *AppService) buildTaurusUserInfo(ctx context.Context, user *biz.User) ma
 		"level":             strconv.Itoa(int(user.CommunityLevel)),
 		"usdt":              decStr(user.AccountBalance),
 		"raw":               decStr(user.AccountBalance),
-		"amountGet":         decStr(user.WithdrawableBalance),
+		"amountGet":         decStrFloor4(user.WithdrawableBalance),
 		"amountUsdt":        decStr(user.AccountBalance),
 		"inviteUserAddress": inviteAddr,
 		"withdrawRate":      withdrawRate,
@@ -211,17 +221,17 @@ func (s *AppService) CompatBuy(w http.ResponseWriter, r *http.Request) {
 		Amount json.Number `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+		compatFail(w)
 		return
 	}
 	amount, err := decimal.NewFromString(body.Amount.String())
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+		compatFail(w)
 		return
 	}
 	loc, err := s.record.CreateLocation(r.Context(), uid, amount)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail"})
+		compatFail(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -280,25 +290,53 @@ func (s *AppService) CompatWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeBizError(w, biz.ErrUnauthorized)
 		return
 	}
-	var body struct {
-		Amount   json.Number `json:"amount"`
-		OrderIDs []uint64    `json:"order_ids"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": "参数错误"})
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		compatFailMsg(w, "参数错误")
 		return
 	}
-	amount, err := decimal.NewFromString(body.Amount.String())
+	amount, err := compatParseDecimal(body["amount"])
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": "金额无效"})
+		compatFailMsg(w, "金额无效")
 		return
 	}
 	wd, err := s.record.CreateWithdraw(r.Context(), uid, amount, nil)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": compatWithdrawMessage(err)})
+		compatFailMsg(w, compatWithdrawMessage(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": wd.ID})
+}
+
+// compatParseDecimal accepts JSON number, string, or null-ish amount from legacy frontends.
+func compatParseDecimal(v any) (decimal.Decimal, error) {
+	if v == nil {
+		return decimal.Zero, errors.New("empty amount")
+	}
+	switch t := v.(type) {
+	case json.Number:
+		s := strings.TrimSpace(t.String())
+		if s == "" {
+			return decimal.Zero, errors.New("empty amount")
+		}
+		return decimal.NewFromString(s)
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return decimal.Zero, errors.New("empty amount")
+		}
+		return decimal.NewFromString(s)
+	case float64:
+		return decimal.NewFromFloat(t), nil
+	default:
+		s := strings.TrimSpace(fmt.Sprint(t))
+		if s == "" || s == "<nil>" {
+			return decimal.Zero, errors.New("empty amount")
+		}
+		return decimal.NewFromString(s)
+	}
 }
 
 func (s *AppService) CompatWithdrawCancel(w http.ResponseWriter, r *http.Request) {
@@ -316,17 +354,19 @@ func (s *AppService) CompatWithdrawCancel(w http.ResponseWriter, r *http.Request
 		id = int64(formOrJSONUint64(r, "id"))
 	}
 	if id == 0 {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": "参数错误"})
+		compatFailMsg(w, "参数错误")
 		return
 	}
 	if _, err := s.record.CancelWithdraw(r.Context(), uid, uint64(id)); err != nil {
 		msg := "取消失败"
-		if errors.Is(err, biz.ErrWithdrawConflict) {
+		if errors.Is(err, biz.ErrWithdrawCancelDisabled) {
+			msg = "提现确认后不可取消"
+		} else if errors.Is(err, biz.ErrWithdrawConflict) {
 			msg = "仅待审订单可取消"
 		} else if errors.Is(err, biz.ErrWithdrawNotFound) {
 			msg = "提现单不存在"
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "fail", "message": msg})
+		compatFailMsg(w, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -336,10 +376,12 @@ func compatWithdrawMessage(err error) string {
 	switch {
 	case errors.Is(err, biz.ErrInsufficientBalance):
 		return "可提余额不足"
-	case errors.Is(err, biz.ErrBelowMinWithdraw):
-		return "低于最低提现金额"
 	case errors.Is(err, biz.ErrInvalidAmount):
 		return "金额无效"
+	case errors.Is(err, biz.ErrPayoutDisabled), errors.Is(err, biz.ErrPayoutNotConfigured), errors.Is(err, biz.ErrPayoutMaxRequired):
+		return "提现暂不可用"
+	case errors.Is(err, biz.ErrPayoutAboveMax):
+		return "超过单笔打款上限"
 	default:
 		return "提现失败"
 	}
@@ -699,6 +741,10 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 		if u.RewardLocked {
 			lockReward = "1"
 		}
+		vipLocked := "0"
+		if u.CommunityLevelLocked {
+			vipLocked = "1"
+		}
 		directs, _ := s.record.CountDirectReferrals(r.Context(), u.ID)
 		out = append(out, map[string]any{
 			"userId":              strconv.FormatUint(u.ID, 10),
@@ -706,7 +752,7 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 			"address":             u.Address,
 			"amountUsdtCurrent":   decStr(activeSum),
 			"bAmount":             zeroStr(),
-			"amountUsdtGet":       decStr(u.WithdrawableBalance),
+			"amountUsdtGet":       decStrFloor4(u.WithdrawableBalance),
 			"amountUsdtTwo":       zeroStr(),
 			"balanceUsdt":         decStr(u.AccountBalance),
 			"balanceDhb":          zeroStr(),
@@ -717,6 +763,7 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 			"areaMin":             zeroStr(),
 			"areaMax":             zeroStr(),
 			"vip":                 strconv.Itoa(int(u.CommunityLevel)),
+			"vipLocked":           vipLocked,
 			"historyRecommend":    strconv.Itoa(directs),
 			"lock":                lock,
 			"lockReward":          lockReward,
@@ -813,16 +860,21 @@ func (s *AppService) CompatAdminWithdrawList(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *AppService) CompatAdminWithdrawPass(w http.ResponseWriter, r *http.Request) {
-	id := formOrJSONUint64(r, "id")
-	if id == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid id"})
-		return
-	}
-	if _, err := s.record.ApproveWithdraw(r.Context(), id); err != nil {
+	compatFailMsg(w, "提现已取消审核，确认即打款")
+}
+
+func (s *AppService) CompatAdminWithdrawReject(w http.ResponseWriter, r *http.Request) {
+	compatFailMsg(w, "提现已取消审核，确认即打款")
+}
+
+// CompatAdminWithdrawCancelPending refunds legacy pending withdraws (ADR 0012 one-shot).
+func (s *AppService) CompatAdminWithdrawCancelPending(w http.ResponseWriter, r *http.Request) {
+	n, err := s.record.CancelAllPendingWithdraws(r.Context())
+	if err != nil {
 		writeBizError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled": n})
 }
 
 func (s *AppService) CompatAdminWithdrawPayout(w http.ResponseWriter, r *http.Request) {
@@ -872,20 +924,6 @@ func (s *AppService) CompatAdminWithdrawPayoutRun(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "processed": n})
-}
-
-func (s *AppService) CompatAdminWithdrawReject(w http.ResponseWriter, r *http.Request) {
-	id := formOrJSONUint64(r, "id")
-	remark := formOrJSONString(r, "remark")
-	if id == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid id"})
-		return
-	}
-	if _, err := s.record.RejectWithdraw(r.Context(), id, remark); err != nil {
-		writeBizError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *AppService) CompatAdminSettle(w http.ResponseWriter, r *http.Request) {
@@ -1085,6 +1123,19 @@ func (s *AppService) CompatAdminVIPUpdate(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *AppService) CompatAdminVIPUnlock(w http.ResponseWriter, r *http.Request) {
+	userID := formOrJSONUint64(r, "user_id")
+	if userID == 0 {
+		writeBizError(w, biz.ErrInvalidAmount)
+		return
+	}
+	if err := s.record.UnlockVIP(r.Context(), userID); err != nil {
+		writeBizError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *AppService) CompatAdminLockUser(w http.ResponseWriter, r *http.Request) {
 	userID := formOrJSONUint64(r, "user_id")
 	lockStr := formOrJSONString(r, "lock")
@@ -1159,7 +1210,7 @@ func (s *AppService) CompatAdminUserRecommend(w http.ResponseWriter, r *http.Req
 			"createdAt":          u.CreatedAt.Format("2006-01-02 15:04:05"),
 			"historyRecommend":   strconv.Itoa(directsCount),
 			"amountUsdtCurrent":  decStr(activeAmt),
-			"amountUsdtGet":      decStr(u.WithdrawableBalance),
+			"amountUsdtGet":      decStrFloor4(u.WithdrawableBalance),
 			"balanceUsdt":        decStr(u.AccountBalance),
 		})
 	}

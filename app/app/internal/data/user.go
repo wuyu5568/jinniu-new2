@@ -16,17 +16,18 @@ func NewUserRepo(d *Data) biz.UserRepo { return &userRepo{data: d} }
 
 func toBizUser(m *UserModel) *biz.User {
 	return &biz.User{
-		ID:                  m.ID,
-		Address:             m.Address,
-		InviterID:           m.InviterID,
-		AccountBalance:      m.AccountBalance,
-		WithdrawableBalance: m.WithdrawableBalance,
-		CommunityLevel:      m.CommunityLevel,
-		CommunityVolume:     m.CommunityVolume,
-		DisabledAt:          m.DisabledAt,
-		RewardLocked:        m.RewardLocked,
-		CreatedAt:           m.CreatedAt,
-		UpdatedAt:           m.UpdatedAt,
+		ID:                   m.ID,
+		Address:              m.Address,
+		InviterID:            m.InviterID,
+		AccountBalance:       m.AccountBalance,
+		WithdrawableBalance:  m.WithdrawableBalance,
+		CommunityLevel:       m.CommunityLevel,
+		CommunityVolume:      m.CommunityVolume,
+		CommunityLevelLocked: m.CommunityLevelLocked,
+		DisabledAt:           m.DisabledAt,
+		RewardLocked:         m.RewardLocked,
+		CreatedAt:            m.CreatedAt,
+		UpdatedAt:            m.UpdatedAt,
 	}
 }
 
@@ -90,6 +91,12 @@ func (r *userRepo) UpdateCommunity(ctx context.Context, userID uint64, level uin
 	return r.data.db.WithContext(ctx).Model(&UserModel{}).
 		Where("id = ?", userID).
 		Updates(map[string]any{"community_level": level, "community_volume": volume}).Error
+}
+
+func (r *userRepo) UpdateCommunityVolume(ctx context.Context, userID uint64, volume decimal.Decimal) error {
+	return r.data.db.WithContext(ctx).Model(&UserModel{}).
+		Where("id = ?", userID).
+		Update("community_volume", volume).Error
 }
 
 func (r *userRepo) ExistsByAddress(ctx context.Context, address string) (bool, error) {
@@ -176,10 +183,26 @@ func (r *userRepo) SetRewardLocked(ctx context.Context, userID uint64, locked bo
 	return nil
 }
 
-func (r *userRepo) SetCommunityLevel(ctx context.Context, userID uint64, level uint8) error {
+func (r *userRepo) SetCommunityLevel(ctx context.Context, userID uint64, level uint8, lock bool) error {
 	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
 		Where("id = ?", userID).
-		Update("community_level", level)
+		Updates(map[string]any{
+			"community_level":        level,
+			"community_level_locked": lock,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return biz.ErrUserNotFound
+	}
+	return nil
+}
+
+func (r *userRepo) SetCommunityLevelLocked(ctx context.Context, userID uint64, locked bool) error {
+	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
+		Where("id = ?", userID).
+		Update("community_level_locked", locked)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -245,61 +268,33 @@ type userBalanceRepo struct{ data *Data }
 func NewUserBalanceRepo(d *Data) biz.UserBalanceRepo { return &userBalanceRepo{data: d} }
 
 func (r *userBalanceRepo) AddAccountBalance(ctx context.Context, userID uint64, delta decimal.Decimal) error {
-	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
-		Where("id = ?", userID).
-		Update("account_balance", gorm.Expr("account_balance + ?", delta))
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return biz.ErrUserNotFound
-	}
-	return nil
+	return r.addBalance(ctx, "account_balance", userID, delta)
 }
 
 func (r *userBalanceRepo) AddWithdrawableBalance(ctx context.Context, userID uint64, delta decimal.Decimal) error {
-	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
-		Where("id = ?", userID).
-		Update("withdrawable_balance", gorm.Expr("withdrawable_balance + ?", delta))
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return biz.ErrUserNotFound
-	}
-	return nil
+	return r.addBalance(ctx, "withdrawable_balance", userID, delta)
 }
 
 func (r *userBalanceRepo) SubAccountBalance(ctx context.Context, userID uint64, delta decimal.Decimal) error {
-	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
-		Where("id = ? AND account_balance >= ?", userID, delta).
-		Update("account_balance", gorm.Expr("account_balance - ?", delta))
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return biz.ErrInsufficientBalance
-	}
-	return nil
+	return r.subBalance(ctx, "account_balance", userID, delta)
 }
 
 func (r *userBalanceRepo) SubWithdrawableBalance(ctx context.Context, userID uint64, delta decimal.Decimal) error {
-	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
-		Where("id = ? AND withdrawable_balance >= ?", userID, delta).
-		Update("withdrawable_balance", gorm.Expr("withdrawable_balance - ?", delta))
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return biz.ErrInsufficientBalance
-	}
-	return nil
+	return r.subBalance(ctx, "withdrawable_balance", userID, delta)
 }
 
 func (r *userBalanceRepo) SetAccountBalance(ctx context.Context, userID uint64, amount decimal.Decimal) error {
+	return r.setBalance(ctx, "account_balance", userID, amount)
+}
+
+func (r *userBalanceRepo) SetWithdrawableBalance(ctx context.Context, userID uint64, amount decimal.Decimal) error {
+	return r.setBalance(ctx, "withdrawable_balance", userID, amount)
+}
+
+func (r *userBalanceRepo) addBalance(ctx context.Context, column string, userID uint64, delta decimal.Decimal) error {
 	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
 		Where("id = ?", userID).
-		Update("account_balance", amount)
+		Update(column, gorm.Expr(column+" + ?", delta))
 	if res.Error != nil {
 		return res.Error
 	}
@@ -309,10 +304,23 @@ func (r *userBalanceRepo) SetAccountBalance(ctx context.Context, userID uint64, 
 	return nil
 }
 
-func (r *userBalanceRepo) SetWithdrawableBalance(ctx context.Context, userID uint64, amount decimal.Decimal) error {
+func (r *userBalanceRepo) subBalance(ctx context.Context, column string, userID uint64, delta decimal.Decimal) error {
+	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
+		Where("id = ? AND "+column+" >= ?", userID, delta).
+		Update(column, gorm.Expr(column+" - ?", delta))
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return biz.ErrInsufficientBalance
+	}
+	return nil
+}
+
+func (r *userBalanceRepo) setBalance(ctx context.Context, column string, userID uint64, amount decimal.Decimal) error {
 	res := r.data.db.WithContext(ctx).Model(&UserModel{}).
 		Where("id = ?", userID).
-		Update("withdrawable_balance", amount)
+		Update(column, amount)
 	if res.Error != nil {
 		return res.Error
 	}

@@ -50,11 +50,45 @@ func TestAdvanceRateClimbAndDescend(t *testing.T) {
 }
 
 func TestCalcStaticYield(t *testing.T) {
-	exit := decimal.RequireFromString("200")
+	// Base is subscribe amount (not exit target).
+	amount := decimal.RequireFromString("1000")
 	rate := decimal.RequireFromString("0.60")
-	got := CalcStaticYield(exit, rate)
-	want := decimal.RequireFromString("1.2")
+	got := CalcStaticYield(amount, rate)
+	want := decimal.RequireFromString("6")
 	if !got.Equal(want) {
 		t.Fatalf("got %s want %s", got, want)
+	}
+}
+
+func TestApplyExtractRateTurnKeepsRateFlipsDirection(t *testing.T) {
+	SetActiveParams(nil)
+	rate := decimal.RequireFromString("0.65")
+	gotRate, gotDir := ApplyExtractRateTurn(rate, RateDirectionUp)
+	if !gotRate.Equal(rate) || gotDir != RateDirectionDown {
+		t.Fatalf("got %s %s want 0.65 down", gotRate, gotDir)
+	}
+	gotRate, gotDir = ApplyExtractRateTurn(rate, RateDirectionDown)
+	if !gotRate.Equal(rate) || gotDir != RateDirectionUp {
+		t.Fatalf("got %s %s want 0.65 up", gotRate, gotDir)
+	}
+}
+
+// After extract turn at 0.65 up: next settle still yields at 0.65, then advances to 0.60.
+func TestExtractTurnThenSettlePaysCurrentThenAdvances(t *testing.T) {
+	SetActiveParams(nil)
+	rate := decimal.RequireFromString("0.65")
+	dir := RateDirectionUp
+	rate, dir = ApplyExtractRateTurn(rate, dir)
+	if !rate.Equal(decimal.RequireFromString("0.65")) || dir != RateDirectionDown {
+		t.Fatalf("after turn %s %s", rate, dir)
+	}
+	// settle: pay at current rate, then advance
+	yieldRate := rate
+	if !yieldRate.Equal(decimal.RequireFromString("0.65")) {
+		t.Fatalf("yield rate %s want 0.65", yieldRate)
+	}
+	rate, dir = AdvanceRate(rate, dir)
+	if !rate.Equal(decimal.RequireFromString("0.60")) || dir != RateDirectionUp {
+		t.Fatalf("after settle advance %s %s want 0.60 up", rate, dir)
 	}
 }

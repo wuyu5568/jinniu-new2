@@ -3,9 +3,8 @@ package biz
 import "github.com/shopspring/decimal"
 
 const (
-	MinPeerLevel    = 3
-	PeerPoolRate    = "0.10"
-	MaxPeerPerChain = 5
+	MinPeerLevel = 3
+	PeerPoolRate = "0.10"
 )
 
 // LevelFromVolume returns V1–V9 (1–9) or 0 when below V1.
@@ -36,7 +35,7 @@ func RateForLevel(level int) decimal.Decimal {
 	return decimal.Zero
 }
 
-// PeerEligible reports whether a level joins 平级分红.
+// PeerEligible reports whether a level may receive 平级 (same-level) reward.
 func PeerEligible(level int) bool {
 	min := GetActiveParams().MinPeerLevel
 	if min <= 0 {
@@ -47,14 +46,9 @@ func PeerEligible(level int) bool {
 
 // SmallAreaVolume is 小区业绩: sum of leg volumes excluding the largest leg.
 func SmallAreaVolume(legVolumes []decimal.Decimal) decimal.Decimal {
-	if len(legVolumes) <= 1 {
+	maxIdx := MaxLegIndex(legVolumes)
+	if maxIdx < 0 || len(legVolumes) <= 1 {
 		return decimal.Zero
-	}
-	maxIdx := 0
-	for i := 1; i < len(legVolumes); i++ {
-		if legVolumes[i].GreaterThan(legVolumes[maxIdx]) {
-			maxIdx = i
-		}
 	}
 	sum := decimal.Zero
 	for i, v := range legVolumes {
@@ -94,15 +88,15 @@ func LegBlocked(selfLevel int, downlineLevels []int) bool {
 	return false
 }
 
-// underCommunityBreak reports 断档子树：node 自身或到 claimant 之前的祖先上出现 V ≥ claimant 等级。
-// 断档节点及其下级静态不发给 claimant；同腿其他分支仍可发。
+// underCommunityBreak reports 断档子树：路径上出现严格高于领取人的 V 级节点。
+// 同级不断档（同级本人改发平级；其下级仍可计级差）。更高档节点及其下级静态不计级差、不发平级。
 func underCommunityBreak(node, claimant uint64, claimantLevel int, parent map[uint64]uint64, levels map[uint64]int) bool {
 	if claimantLevel <= 0 {
 		return false
 	}
 	cur := node
 	for cur != claimant {
-		if levels[cur] >= claimantLevel {
+		if levels[cur] > claimantLevel {
 			return true
 		}
 		p, ok := parent[cur]
@@ -140,7 +134,13 @@ func CollectSubtreeIDs(root uint64, children map[uint64][]uint64) []uint64 {
 	return out
 }
 
-// CalcCommunityBase computes 社区基础奖 (级差) for claimant.
+// CommunityRewardSplit is 级差 + 小区同级平级（本人静态×比例） for one claimant.
+type CommunityRewardSplit struct {
+	Base decimal.Decimal
+	Peer decimal.Decimal
+}
+
+// CalcCommunityBase computes 社区基础奖 (级差 only) for claimant.
 func CalcCommunityBase(
 	claimant uint64,
 	children map[uint64][]uint64,
@@ -149,23 +149,41 @@ func CalcCommunityBase(
 	personal map[uint64]decimal.Decimal,
 	todayStatic map[uint64]decimal.Decimal,
 ) decimal.Decimal {
+	return CalcCommunityRewards(claimant, children, parent, levels, personal, todayStatic).Base
+}
+
+// CalcCommunityRewards computes 级差 + 小区同级平级 for claimant.
+// 同级且双方 ≥ min_peer_level：不跟该人算级差，改发其本人当日静态 × peer_pool_rate；
+// 其下级仍计级差，对照比例为路径上最靠近领取人的有等级档（跳过与领取人同级）。更高档仍整段断档。
+func CalcCommunityRewards(
+	claimant uint64,
+	children map[uint64][]uint64,
+	parent map[uint64]uint64,
+	levels map[uint64]int,
+	personal map[uint64]decimal.Decimal,
+	todayStatic map[uint64]decimal.Decimal,
+) CommunityRewardSplit {
 	selfLevel := levels[claimant]
 	ru := RateForLevel(selfLevel)
+	out := CommunityRewardSplit{}
 	if !ru.IsPositive() {
-		return decimal.Zero
+		return out
 	}
 
 	legs := children[claimant]
 	if len(legs) == 0 {
-		return decimal.Zero
+		return out
 	}
 	legVols := make([]decimal.Decimal, len(legs))
 	for i, leg := range legs {
 		legVols[i] = SubtreeVolume(leg, children, personal)
 	}
 	maxIdx := MaxLegIndex(legVols)
+	peerRate := GetActiveParams().peerPoolRateDec()
+	claimantPeerOK := PeerEligible(selfLevel)
 
-	total := decimal.Zero
+	base := decimal.Zero
+	peer := decimal.Zero
 	for i, legRoot := range legs {
 		if i == maxIdx {
 			continue
@@ -179,121 +197,41 @@ func CalcCommunityBase(
 			if !s.IsPositive() {
 				continue
 			}
-			govRate := deepestGradedRateBelow(x, claimant, parent, levels)
+			lv := levels[x]
+			if lv == selfLevel && claimantPeerOK && PeerEligible(lv) {
+				peer = peer.Add(s.Mul(peerRate))
+				continue
+			}
+			govRate := nearestGradedRateBelowClaimant(x, claimant, selfLevel, parent, levels)
 			diff := ru.Sub(govRate)
 			if diff.IsPositive() {
-				total = total.Add(s.Mul(diff))
+				base = base.Add(s.Mul(diff))
 			}
 		}
 	}
-	return total.Round(8)
+	out.Base = base.Round(8)
+	out.Peer = peer.Round(8)
+	return out
 }
 
-func deepestGradedRateBelow(node, claimant uint64, parent map[uint64]uint64, levels map[uint64]int) decimal.Decimal {
+// nearestGradedRateBelowClaimant walks from node up to claimant and returns the rate of the
+// graded node nearest to the claimant (last non-peer-same-level grade on the path).
+// Example: A(V9)-B(V5)-C(V3)-D → for A on D's static, gov is B's 40% (not C's 30%).
+func nearestGradedRateBelowClaimant(node, claimant uint64, claimantLevel int, parent map[uint64]uint64, levels map[uint64]int) decimal.Decimal {
 	cur := node
-	for {
-		if lv := levels[cur]; lv > 0 {
-			return RateForLevel(lv)
+	last := decimal.Zero
+	for cur != claimant {
+		if lv := levels[cur]; lv > 0 && lv != claimantLevel {
+			last = RateForLevel(lv)
 		}
-		p, ok := parent[cur]
-		if !ok || p == claimant {
-			return decimal.Zero
-		}
-		cur = p
-	}
-}
-
-func legRootToward(claimant, source uint64, parent map[uint64]uint64) uint64 {
-	cur := source
-	for {
 		p, ok := parent[cur]
 		if !ok {
-			return 0
+			return last
 		}
 		if p == claimant {
-			return cur
+			return last
 		}
 		cur = p
 	}
-}
-
-func sourceInSmallArea(
-	claimant, source uint64,
-	children map[uint64][]uint64,
-	parent map[uint64]uint64,
-	personal map[uint64]decimal.Decimal,
-) bool {
-	legs := children[claimant]
-	if len(legs) < 2 {
-		return false
-	}
-	legRoot := legRootToward(claimant, source, parent)
-	if legRoot == 0 {
-		return false
-	}
-	legVols := make([]decimal.Decimal, len(legs))
-	legIdx := -1
-	for i, leg := range legs {
-		legVols[i] = SubtreeVolume(leg, children, personal)
-		if leg == legRoot {
-			legIdx = i
-		}
-	}
-	if legIdx < 0 {
-		return false
-	}
-	return legIdx != MaxLegIndex(legVols)
-}
-
-// CalcPeerRewards returns 上行链平级分红 keyed by recipient user id.
-func CalcPeerRewards(
-	children map[uint64][]uint64,
-	parent map[uint64]uint64,
-	levels map[uint64]int,
-	personal map[uint64]decimal.Decimal,
-	todayStatic map[uint64]decimal.Decimal,
-) map[uint64]decimal.Decimal {
-	rate := GetActiveParams().peerPoolRateDec()
-	out := map[uint64]decimal.Decimal{}
-	for source, static := range todayStatic {
-		if !static.IsPositive() {
-			continue
-		}
-		lastLevel := 0
-		peerCount := 0
-		cur := source
-		for {
-			p, ok := parent[cur]
-			if !ok {
-				break
-			}
-			if !sourceInSmallArea(p, source, children, parent, personal) {
-				cur = p
-				continue
-			}
-			lv := levels[p]
-			if lv <= 0 {
-				cur = p
-				continue
-			}
-			if lv < lastLevel {
-				cur = p
-				continue
-			}
-			if lv == lastLevel {
-				if PeerEligible(lv) && peerCount < MaxPeerPerChain {
-					amt := static.Mul(rate).Round(8)
-					if amt.IsPositive() {
-						out[p] = out[p].Add(amt)
-						peerCount++
-					}
-				}
-				cur = p
-				continue
-			}
-			lastLevel = lv
-			cur = p
-		}
-	}
-	return out
+	return last
 }

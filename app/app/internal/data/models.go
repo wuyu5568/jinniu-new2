@@ -13,10 +13,11 @@ type UserModel struct {
 	InviterID           *uint64
 	AccountBalance      decimal.Decimal `gorm:"type:decimal(36,8)"`
 	WithdrawableBalance decimal.Decimal `gorm:"type:decimal(36,8)"`
-	CommunityLevel      uint8
-	CommunityVolume     decimal.Decimal `gorm:"type:decimal(36,8)"`
-	DisabledAt          *time.Time
-	RewardLocked        bool
+	CommunityLevel       uint8
+	CommunityVolume      decimal.Decimal `gorm:"type:decimal(36,8)"`
+	CommunityLevelLocked bool            `gorm:"column:community_level_locked"`
+	DisabledAt           *time.Time
+	RewardLocked         bool
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -35,17 +36,18 @@ type LoginChallengeModel struct {
 func (LoginChallengeModel) TableName() string { return "login_challenges" }
 
 type LocationModel struct {
-	ID            uint64 `gorm:"primaryKey"`
-	UserID        uint64 `gorm:"index"`
-	Amount        decimal.Decimal `gorm:"type:decimal(36,8)"`
-	Multiplier    decimal.Decimal `gorm:"type:decimal(3,1)"`
-	ExitTarget    decimal.Decimal `gorm:"type:decimal(36,8)"`
-	Accumulated   decimal.Decimal `gorm:"type:decimal(36,8)"`
-	Status        string          `gorm:"size:16;index"`
-	RatePercent   decimal.Decimal `gorm:"type:decimal(5,2)"`
-	RateDirection string          `gorm:"size:8"`
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID              uint64 `gorm:"primaryKey"`
+	UserID          uint64 `gorm:"index"`
+	Amount          decimal.Decimal `gorm:"type:decimal(36,8)"`
+	Multiplier      decimal.Decimal `gorm:"type:decimal(3,1)"`
+	ExitTarget      decimal.Decimal `gorm:"type:decimal(36,8)"`
+	Accumulated     decimal.Decimal `gorm:"type:decimal(36,8)"`
+	Status          string          `gorm:"size:16;index"`
+	RatePercent     decimal.Decimal `gorm:"type:decimal(5,2)"`
+	RateDirection   string          `gorm:"size:8"`
+	RateTurnPending bool            `gorm:"column:rate_turn_pending"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 func (LocationModel) TableName() string { return "locations" }

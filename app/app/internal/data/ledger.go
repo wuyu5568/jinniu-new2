@@ -34,20 +34,7 @@ func (r *ledgerRepo) ListByUser(ctx context.Context, userID uint64, from, to tim
 	if err := q.Order("created_at DESC, id DESC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make([]*biz.LedgerEntry, len(rows))
-	for i := range rows {
-		out[i] = &biz.LedgerEntry{
-			ID:          rows[i].ID,
-			UserID:      rows[i].UserID,
-			OrderID:     rows[i].OrderID,
-			EntryType:   rows[i].EntryType,
-			Amount:      rows[i].Amount,
-			BalanceKind: rows[i].BalanceKind,
-			Remark:      rows[i].Remark,
-			CreatedAt:   rows[i].CreatedAt,
-		}
-	}
-	return out, nil
+	return ledgerModelsToBiz(rows), nil
 }
 
 func (r *ledgerRepo) ListPaged(ctx context.Context, address, entryType string, page, pageSize int) ([]*biz.LedgerEntry, int, error) {
@@ -77,6 +64,10 @@ func (r *ledgerRepo) ListPaged(ctx context.Context, address, entryType string, p
 		Offset(offset).Limit(pageSize).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
+	return ledgerModelsToBiz(rows), int(total), nil
+}
+
+func ledgerModelsToBiz(rows []LedgerEntryModel) []*biz.LedgerEntry {
 	out := make([]*biz.LedgerEntry, len(rows))
 	for i := range rows {
 		out[i] = &biz.LedgerEntry{
@@ -90,7 +81,7 @@ func (r *ledgerRepo) ListPaged(ctx context.Context, address, entryType string, p
 			CreatedAt:   rows[i].CreatedAt,
 		}
 	}
-	return out, int(total), nil
+	return out
 }
 
 func (r *ledgerRepo) SumAmountByTypes(ctx context.Context, entryTypes []string) (decimal.Decimal, error) {

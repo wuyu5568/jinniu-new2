@@ -82,13 +82,14 @@ func ReverseRateDirection(direction string) string {
 	return RateDirectionDown
 }
 
-// ApplyExtractRateTurn prepares next-day rate after extract approval.
+// ApplyExtractRateTurn flips climb/descend only; rate percent is unchanged.
+// Caller skips when RateTurnPending is already set (once per settle cycle).
 func ApplyExtractRateTurn(current decimal.Decimal, direction string) (decimal.Decimal, string) {
-	reversed := ReverseRateDirection(direction)
-	return AdvanceRate(current, reversed)
+	return current, ReverseRateDirection(direction)
 }
 
-// CalcStaticYield computes static yield: exitTarget * ratePercent / 100.
-func CalcStaticYield(exitTarget, ratePercent decimal.Decimal) decimal.Decimal {
-	return exitTarget.Mul(ratePercent).Div(decimal.NewFromInt(100)).Round(8)
+// CalcStaticYield computes static yield: subscribeAmount * ratePercent / 100.
+// Exit still uses exitTarget (= amount × multiplier); only the daily yield base is subscribe amount.
+func CalcStaticYield(subscribeAmount, ratePercent decimal.Decimal) decimal.Decimal {
+	return subscribeAmount.Mul(ratePercent).Div(decimal.NewFromInt(100)).Round(8)
 }

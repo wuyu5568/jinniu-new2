@@ -20,6 +20,8 @@ var (
 	ErrBelowMinWithdraw      = errors.BadRequest("BIZ_BELOW_MIN_WITHDRAW", "below min withdraw amount")
 	ErrWithdrawNotFound      = errors.NotFound("BIZ_WITHDRAW_NOT_FOUND", "withdraw not found")
 	ErrWithdrawConflict      = errors.BadRequest("BIZ_WITHDRAW_CONFLICT", "withdraw not pending")
+	ErrWithdrawCancelDisabled = errors.Forbidden("BIZ_WITHDRAW_CANCEL_DISABLED", "withdraw cancel disabled")
+	ErrWithdrawReviewDisabled = errors.Forbidden("BIZ_WITHDRAW_REVIEW_DISABLED", "withdraw review disabled")
 	ErrForceSettleDisabled   = errors.Forbidden("BIZ_FORCE_SETTLE_DISABLED", "force settle disabled")
 	ErrPayoutDisabled        = errors.Forbidden("BIZ_PAYOUT_DISABLED", "payout disabled")
 	ErrPayoutNotConfigured   = errors.BadRequest("BIZ_PAYOUT_NOT_CONFIGURED", "payout wallet or rpc not configured")

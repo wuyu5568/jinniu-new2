@@ -358,84 +358,48 @@ func (a *AppService) syncChainDeposits(ctx context.Context, opts chainDepositOpt
 }
 
 func getUserLength(address string) (int64, error) {
-	urls := bscRPCURLs()
-	var lastErr error
-	for _, url1 := range urls {
-		client, err := ethclient.Dial(url1)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		instance, err := NewBuySomething(common.HexToAddress(address), client)
-		if err != nil {
-			lastErr = err
-			client.Close()
-			continue
-		}
+	var out int64
+	err := withBuySomething(address, func(instance *BuySomething) error {
 		bals, err := instance.GetUserLength(&bind.CallOpts{})
-		client.Close()
 		if err != nil {
-			lastErr = err
-			continue
+			return err
 		}
-		return bals.Int64(), nil
+		out = bals.Int64()
+		return nil
+	})
+	if err != nil {
+		return -1, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("all bsc rpc failed")
-	}
-	return -1, lastErr
+	return out, nil
 }
 
 func getUserInfo(start int64, end int64, address string) ([]*userDeposit, error) {
 	if start > end {
 		return nil, nil
 	}
-	urls := bscRPCURLs()
 	var (
 		bals  []common.Address
 		bals2 []*big.Int
 		bals3 []*big.Int
-		lastErr error
 	)
-
-	for _, url1 := range urls {
-		client, err := ethclient.Dial(url1)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		instance, err := NewBuySomething(common.HexToAddress(address), client)
-		if err != nil {
-			lastErr = err
-			client.Close()
-			continue
-		}
+	err := withBuySomething(address, func(instance *BuySomething) error {
 		opts := &bind.CallOpts{}
 		startBI := new(big.Int).SetInt64(start)
 		endBI := new(big.Int).SetInt64(end)
+		var err error
 		bals, err = instance.GetUsersByIndex(opts, startBI, endBI)
 		if err != nil {
-			lastErr = err
-			client.Close()
-			continue
+			return err
 		}
 		bals2, err = instance.GetUsersAmountByIndex(opts, startBI, endBI)
 		if err != nil {
-			lastErr = err
-			client.Close()
-			continue
+			return err
 		}
 		bals3, err = instance.GetIdsByIndex(opts, startBI, endBI)
-		client.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
-		return nil, lastErr
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 	if len(bals) != len(bals2) || len(bals) != len(bals3) {
 		return nil, fmt.Errorf("chain deposit batch length mismatch users=%d amounts=%d ids=%d", len(bals), len(bals2), len(bals3))
@@ -451,6 +415,35 @@ func getUserInfo(start int64, end int64, address string) ([]*userDeposit, error)
 		})
 	}
 	return users, nil
+}
+
+// withBuySomething dials BSC RPCs in order and runs fn against BuySomething.
+func withBuySomething(contract string, fn func(*BuySomething) error) error {
+	var lastErr error
+	for _, url1 := range bscRPCURLs() {
+		client, err := ethclient.Dial(url1)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		instance, err := NewBuySomething(common.HexToAddress(contract), client)
+		if err != nil {
+			lastErr = err
+			client.Close()
+			continue
+		}
+		err = fn(instance)
+		client.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all bsc rpc failed")
+	}
+	return lastErr
 }
 
 func amountAsUSDT(v *big.Int) int64 {

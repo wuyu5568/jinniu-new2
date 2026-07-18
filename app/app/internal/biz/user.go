@@ -20,12 +20,13 @@ type User struct {
 	InviterID           *uint64
 	AccountBalance      decimal.Decimal
 	WithdrawableBalance decimal.Decimal
-	CommunityLevel      uint8
-	CommunityVolume     decimal.Decimal
-	DisabledAt          *time.Time
-	RewardLocked        bool
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	CommunityLevel       uint8
+	CommunityVolume      decimal.Decimal
+	CommunityLevelLocked bool // admin-set; settle keeps level, updates volume only
+	DisabledAt           *time.Time
+	RewardLocked         bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 func (u *User) IsDisabled() bool {
@@ -50,13 +51,15 @@ type UserRepo interface {
 	ListAll(ctx context.Context) ([]*User, error)
 	CountDirectReferrals(ctx context.Context, userID uint64) (int, error)
 	UpdateCommunity(ctx context.Context, userID uint64, level uint8, volume decimal.Decimal) error
+	UpdateCommunityVolume(ctx context.Context, userID uint64, volume decimal.Decimal) error
 	ExistsByAddress(ctx context.Context, address string) (bool, error)
 	ListPaged(ctx context.Context, address string, page, pageSize int) ([]*User, int, error)
 	ListByInviter(ctx context.Context, inviterID uint64) ([]*User, error)
 	SoftDelete(ctx context.Context, userID uint64, at time.Time) error
 	Restore(ctx context.Context, userID uint64) error
 	SetRewardLocked(ctx context.Context, userID uint64, locked bool) error
-	SetCommunityLevel(ctx context.Context, userID uint64, level uint8) error
+	SetCommunityLevel(ctx context.Context, userID uint64, level uint8, lock bool) error
+	SetCommunityLevelLocked(ctx context.Context, userID uint64, locked bool) error
 	ListByPathPrefix(ctx context.Context, pathPrefix string) ([]*User, error)
 	CountAll(ctx context.Context) (int, error)
 	CountNonDisabled(ctx context.Context) (int, error)
@@ -327,36 +330,24 @@ func (uc *UserUseCase) AdminLogin(_ context.Context, username, password string) 
 
 // SetWithdrawable sets withdrawable balance to an absolute target (>= 0) and ledgers the delta as admin_adjust.
 func (uc *UserUseCase) SetWithdrawable(ctx context.Context, address string, amount decimal.Decimal) (*User, error) {
-	address, ok := wallet.NormalizeAddress(address)
-	if !ok || amount.IsNegative() {
-		return nil, ErrInvalidAmount
-	}
-	user, err := uc.users.FindByAddress(ctx, address)
-	if err != nil || user == nil {
-		return nil, ErrUserNotFound
-	}
-	before := user.WithdrawableBalance
-	if before.Equal(amount) {
-		return user, nil
-	}
-	if err := uc.balances.SetWithdrawableBalance(ctx, user.ID, amount); err != nil {
-		return nil, err
-	}
-	if uc.ledger != nil {
-		delta := amount.Sub(before)
-		_ = uc.ledger.Create(ctx, &LedgerEntry{
-			UserID:      user.ID,
-			EntryType:   LedgerAdminAdjust,
-			Amount:      delta,
-			BalanceKind: BalanceWithdrawable,
-			Remark:      "admin set withdrawable " + before.String() + "->" + amount.String(),
-		})
-	}
-	return uc.users.FindByID(ctx, user.ID)
+	return uc.setBalanceAbsolute(ctx, address, amount, func(u *User) decimal.Decimal { return u.WithdrawableBalance },
+		uc.balances.SetWithdrawableBalance, LedgerAdminAdjust, BalanceWithdrawable, "admin set withdrawable ")
 }
 
 // SetAccountBalance sets account balance to an absolute target (>= 0) and ledgers the delta as deposit.
 func (uc *UserUseCase) SetAccountBalance(ctx context.Context, address string, amount decimal.Decimal) (*User, error) {
+	return uc.setBalanceAbsolute(ctx, address, amount, func(u *User) decimal.Decimal { return u.AccountBalance },
+		uc.balances.SetAccountBalance, LedgerDeposit, BalanceAccount, "admin set account ")
+}
+
+func (uc *UserUseCase) setBalanceAbsolute(
+	ctx context.Context,
+	address string,
+	amount decimal.Decimal,
+	beforeOf func(*User) decimal.Decimal,
+	setFn func(context.Context, uint64, decimal.Decimal) error,
+	entryType, balanceKind, remarkPrefix string,
+) (*User, error) {
 	address, ok := wallet.NormalizeAddress(address)
 	if !ok || amount.IsNegative() {
 		return nil, ErrInvalidAmount
@@ -365,21 +356,20 @@ func (uc *UserUseCase) SetAccountBalance(ctx context.Context, address string, am
 	if err != nil || user == nil {
 		return nil, ErrUserNotFound
 	}
-	before := user.AccountBalance
+	before := beforeOf(user)
 	if before.Equal(amount) {
 		return user, nil
 	}
-	if err := uc.balances.SetAccountBalance(ctx, user.ID, amount); err != nil {
+	if err := setFn(ctx, user.ID, amount); err != nil {
 		return nil, err
 	}
 	if uc.ledger != nil {
-		delta := amount.Sub(before)
 		_ = uc.ledger.Create(ctx, &LedgerEntry{
 			UserID:      user.ID,
-			EntryType:   LedgerDeposit,
-			Amount:      delta,
-			BalanceKind: BalanceAccount,
-			Remark:      "admin set account " + before.String() + "->" + amount.String(),
+			EntryType:   entryType,
+			Amount:      amount.Sub(before),
+			BalanceKind: balanceKind,
+			Remark:      remarkPrefix + before.String() + "->" + amount.String(),
 		})
 	}
 	return uc.users.FindByID(ctx, user.ID)

@@ -91,7 +91,7 @@ curl -s -X POST "$BASE/api/app_server/v1/locations" \
 curl -s "$BASE/api/app_server/v1/locations" -H "Authorization: Bearer $TOKEN"
 ```
 
-## 9. 手动结算（静态 → 代数 → 社区 V → 基础奖 → 平级）
+## 9. 手动结算（静态 → 代数 → 社区 V → 社区基础奖+小区同级平级）
 
 ```bash
 curl -s -X POST "$BASE/api/admin_jinniu/v1/settle/run" \
