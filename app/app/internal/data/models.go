@@ -43,9 +43,10 @@ type LocationModel struct {
 	ExitTarget      decimal.Decimal `gorm:"type:decimal(36,8)"`
 	Accumulated     decimal.Decimal `gorm:"type:decimal(36,8)"`
 	Status          string          `gorm:"size:16;index"`
-	RatePercent     decimal.Decimal `gorm:"type:decimal(5,2)"`
-	RateDirection   string          `gorm:"size:8"`
-	RateTurnPending bool            `gorm:"column:rate_turn_pending"`
+	RatePercent     decimal.Decimal  `gorm:"type:decimal(5,2)"`
+	RateDirection   string           `gorm:"size:8"`
+	RateTurnPending bool             `gorm:"column:rate_turn_pending"`
+	LastSettledRate *decimal.Decimal `gorm:"column:last_settled_rate;type:decimal(5,2)"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }

@@ -87,6 +87,15 @@ func (r *userRepo) CountDirectReferrals(ctx context.Context, userID uint64) (int
 	return int(n), err
 }
 
+func (r *userRepo) CountEffectiveDirectReferrals(ctx context.Context, userID uint64) (int, error) {
+	var n int64
+	err := r.data.db.WithContext(ctx).Model(&UserModel{}).
+		Where("inviter_id = ?", userID).
+		Where("EXISTS (SELECT 1 FROM locations WHERE locations.user_id = users.id)").
+		Count(&n).Error
+	return int(n), err
+}
+
 func (r *userRepo) UpdateCommunity(ctx context.Context, userID uint64, level uint8, volume decimal.Decimal) error {
 	return r.data.db.WithContext(ctx).Model(&UserModel{}).
 		Where("id = ?", userID).

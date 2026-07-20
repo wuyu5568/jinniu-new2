@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"database/sql"
@@ -209,7 +209,7 @@ func main() {
 		vols[i] = subtree(leg, children, personal)
 	}
 	mi := maxIdx(vols)
-	fmt.Printf("直推腿数=%d  大区腿=uid:%d %s 业绩=%s（整腿不计社区奖）\n", len(legs), legs[mi], short(addrOf[legs[mi]]), vols[mi])
+	fmt.Printf("直推腿数=%d  大区腿=uid:%d %s 业绩=%s（定级用；发奖大小区都计）\n", len(legs), legs[mi], short(addrOf[legs[mi]]), vols[mi])
 	fmt.Printf("小区业绩=%s → V%d\n\n", smallArea(vols), selfLevel)
 
 	type line struct {
@@ -219,21 +219,16 @@ func main() {
 	}
 	var lines []line
 	total := decimal.Zero
-	skipMax := decimal.Zero
+	maxLegStatic := decimal.Zero
 
 	for i, legRoot := range legs {
-		if i == mi {
-			for _, x := range collect(legRoot, children) {
-				if s := todayStatic[x]; s.IsPositive() {
-					skipMax = skipMax.Add(s)
-				}
-			}
-			continue
-		}
 		for _, x := range collect(legRoot, children) {
 			s := todayStatic[x]
 			if !s.IsPositive() {
 				continue
+			}
+			if i == mi {
+				maxLegStatic = maxLegStatic.Add(s)
 			}
 			if underBreak(x, claimant, selfLevel, parent, levels) {
 				lines = append(lines, line{uid: x, leg: legRoot, static: s, brk: true})
@@ -250,7 +245,7 @@ func main() {
 		}
 	}
 	total = total.Round(8)
-	fmt.Printf("重算合计=%s  流水记账=68822.22500000  大区腿内当日静态合计(不计)=%s\n\n", total, skipMax)
+	fmt.Printf("重算合计=%s  大区腿内当日静态合计(已计奖)=%s\n\n", total, maxLegStatic)
 
 	sort.Slice(lines, func(i, j int) bool {
 		if lines[i].brk != lines[j].brk {

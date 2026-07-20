@@ -50,6 +50,8 @@ type UserRepo interface {
 	Create(ctx context.Context, u *User) (*User, error)
 	ListAll(ctx context.Context) ([]*User, error)
 	CountDirectReferrals(ctx context.Context, userID uint64) (int, error)
+	// CountEffectiveDirectReferrals counts 直推 who have at least one 认购订单 (含已出局).
+	CountEffectiveDirectReferrals(ctx context.Context, userID uint64) (int, error)
 	UpdateCommunity(ctx context.Context, userID uint64, level uint8, volume decimal.Decimal) error
 	UpdateCommunityVolume(ctx context.Context, userID uint64, volume decimal.Decimal) error
 	ExistsByAddress(ctx context.Context, address string) (bool, error)

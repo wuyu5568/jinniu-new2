@@ -50,7 +50,6 @@ func TestAdvanceRateClimbAndDescend(t *testing.T) {
 }
 
 func TestCalcStaticYield(t *testing.T) {
-	// Base is subscribe amount (not exit target).
 	amount := decimal.RequireFromString("1000")
 	rate := decimal.RequireFromString("0.60")
 	got := CalcStaticYield(amount, rate)
@@ -60,32 +59,71 @@ func TestCalcStaticYield(t *testing.T) {
 	}
 }
 
-func TestApplyExtractRateTurnKeepsRateFlipsDirection(t *testing.T) {
+func decPtr(s string) *decimal.Decimal {
+	d := decimal.RequireFromString(s)
+	return &d
+}
+
+// Yesterday settled 0.70; order may already be 0.75 — turn from 0.70 → 0.65 down.
+func TestApplyExtractRateTurn_FromLastSettled(t *testing.T) {
 	SetActiveParams(nil)
-	rate := decimal.RequireFromString("0.65")
-	gotRate, gotDir := ApplyExtractRateTurn(rate, RateDirectionUp)
-	if !gotRate.Equal(rate) || gotDir != RateDirectionDown {
-		t.Fatalf("got %s %s want 0.65 down", gotRate, gotDir)
+	gotRate, gotDir, ok := ApplyExtractRateTurn(RateDirectionUp, decPtr("0.70"))
+	if !ok {
+		t.Fatal("expected applied")
 	}
-	gotRate, gotDir = ApplyExtractRateTurn(rate, RateDirectionDown)
-	if !gotRate.Equal(rate) || gotDir != RateDirectionUp {
-		t.Fatalf("got %s %s want 0.65 up", gotRate, gotDir)
+	if !gotRate.Equal(decimal.RequireFromString("0.65")) || gotDir != RateDirectionDown {
+		t.Fatalf("got %s %s want 0.65 down", gotRate, gotDir)
 	}
 }
 
-// After extract turn at 0.65 up: next settle still yields at 0.65, then advances to 0.60.
-func TestExtractTurnThenSettlePaysCurrentThenAdvances(t *testing.T) {
+func TestApplyExtractRateTurn_DownSkipped(t *testing.T) {
 	SetActiveParams(nil)
-	rate := decimal.RequireFromString("0.65")
-	dir := RateDirectionUp
-	rate, dir = ApplyExtractRateTurn(rate, dir)
-	if !rate.Equal(decimal.RequireFromString("0.65")) || dir != RateDirectionDown {
-		t.Fatalf("after turn %s %s", rate, dir)
+	_, _, ok := ApplyExtractRateTurn(RateDirectionDown, decPtr("0.70"))
+	if ok {
+		t.Fatal("down should not turn")
 	}
-	// settle: pay at current rate, then advance
-	yieldRate := rate
-	if !yieldRate.Equal(decimal.RequireFromString("0.65")) {
-		t.Fatalf("yield rate %s want 0.65", yieldRate)
+}
+
+func TestApplyExtractRateTurn_NilLastSettledSkipped(t *testing.T) {
+	SetActiveParams(nil)
+	_, _, ok := ApplyExtractRateTurn(RateDirectionUp, nil)
+	if ok {
+		t.Fatal("nil last settled should not turn")
+	}
+}
+
+// Yesterday settled at min → rewind to 0.60 up (today still settles at 0.60).
+func TestApplyExtractRateTurn_LastSettledMinRewinds(t *testing.T) {
+	SetActiveParams(nil)
+	gotRate, gotDir, ok := ApplyExtractRateTurn(RateDirectionUp, decPtr("0.60"))
+	if !ok {
+		t.Fatal("expected applied")
+	}
+	if !gotRate.Equal(decimal.RequireFromString("0.60")) || gotDir != RateDirectionUp {
+		t.Fatalf("got %s %s want 0.60 up", gotRate, gotDir)
+	}
+}
+
+func TestApplyExtractRateTurn_LastSettledNextToMin(t *testing.T) {
+	SetActiveParams(nil)
+	rate, dir, ok := ApplyExtractRateTurn(RateDirectionUp, decPtr("0.65"))
+	if !ok {
+		t.Fatal("expected applied")
+	}
+	if !rate.Equal(decimal.RequireFromString("0.60")) || dir != RateDirectionUp {
+		t.Fatalf("got %s %s want 0.60 up", rate, dir)
+	}
+}
+
+// After turn from lastSettled 0.70: order at 0.65; settle pays 0.65 then advances.
+func TestExtractTurnThenSettlePaysSteppedRateThenAdvances(t *testing.T) {
+	SetActiveParams(nil)
+	rate, dir, ok := ApplyExtractRateTurn(RateDirectionUp, decPtr("0.70"))
+	if !ok || !rate.Equal(decimal.RequireFromString("0.65")) || dir != RateDirectionDown {
+		t.Fatalf("after turn %s %s ok=%v", rate, dir, ok)
+	}
+	if !rate.Equal(decimal.RequireFromString("0.65")) {
+		t.Fatalf("yield rate %s want 0.65", rate)
 	}
 	rate, dir = AdvanceRate(rate, dir)
 	if !rate.Equal(decimal.RequireFromString("0.60")) || dir != RateDirectionUp {

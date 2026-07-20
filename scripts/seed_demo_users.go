@@ -346,7 +346,7 @@ func levelLadderDemos() []demoUser {
 }
 
 func peerRelationDemos() []demoUser {
-	// 平级条件：来源须在领取人小区（非最大腿）。故 fill 腿业绩必须 > 链腿（含 src）子树。
+	// 平级：来源可在大小区；fill 腿仍用于抬高上级小区业绩/定级。
 	// dual V3: upper_fill(170000) > lower_sub(100+80000+80000=160100)
 	return []demoUser{
 		{
@@ -591,22 +591,23 @@ func validateExpectVIP(db *sql.DB, demos []demoUser, ids map[string]uint64) erro
 	return nil
 }
 
-// validatePeerTopo checks 小区同级平级：claimant 对 peerSrc 本人静态应产生平级。
+// validatePeerTopo checks 平级：claimant 对同级下级 peerSrc 的社区基础奖应抽 10%（静态落在 peerSrc 下级）。
 func validatePeerTopo(db *sql.DB, ids map[string]uint64) error {
 	type expect struct {
-		claimant string
-		peerSrc  string
+		claimant  string
+		peerSrc   string
+		staticSrc string
 	}
 	cases := []expect{
-		{claimant: "peer3_upper", peerSrc: "peer3_lower"},
-		{claimant: "peer4_upper", peerSrc: "peer4_lower"},
-		{claimant: "peer3x_b", peerSrc: "peer3x_c"},
+		{claimant: "peer3_upper", peerSrc: "peer3_lower", staticSrc: "peer3_src"},
+		{claimant: "peer4_upper", peerSrc: "peer4_lower", staticSrc: "peer4_src"},
+		{claimant: "peer3x_b", peerSrc: "peer3x_c", staticSrc: "peer3x_src"},
 	}
 
 	parent := map[uint64]uint64{}
 	children := map[uint64][]uint64{}
 	levels := map[uint64]int{}
-	personal := map[uint64]decimal.Decimal{}
+	var allIDs []uint64
 
 	rows, err := db.Query(`SELECT id, inviter_id, community_level FROM users`)
 	if err != nil {
@@ -621,24 +622,12 @@ func validatePeerTopo(db *sql.DB, ids map[string]uint64) error {
 			return err
 		}
 		levels[id] = lv
+		allIDs = append(allIDs, id)
 		if inv.Valid {
 			pid := uint64(inv.Int64)
 			parent[id] = pid
 			children[pid] = append(children[pid], id)
 		}
-	}
-	prows, err := db.Query(`SELECT user_id, COALESCE(SUM(amount),0) FROM locations GROUP BY user_id`)
-	if err != nil {
-		return err
-	}
-	defer prows.Close()
-	for prows.Next() {
-		var uid uint64
-		var sum string
-		if err := prows.Scan(&uid, &sum); err != nil {
-			return err
-		}
-		personal[uid], _ = decimal.NewFromString(sum)
 	}
 
 	bad := 0
@@ -655,13 +644,21 @@ func validatePeerTopo(db *sql.DB, ids map[string]uint64) error {
 			bad++
 			continue
 		}
-		static := map[uint64]decimal.Decimal{sid: decimal.NewFromInt(1)}
-		got := calcCommunityRewardsLocal(cid, children, parent, levels, personal, static)
-		if !got.Peer.IsPositive() {
-			fmt.Printf("FAIL [peer] %s should get peer from %s (same-level in small area)\n", c.claimant, c.peerSrc)
+		srcID, ok := ids[c.staticSrc]
+		if !ok {
+			fmt.Printf("FAIL [peer] missing staticSrc %s\n", c.staticSrc)
+			bad++
+			continue
+		}
+		static := map[uint64]decimal.Decimal{srcID: decimal.NewFromInt(100)}
+		all := computeAllCommunityLocal(allIDs, children, parent, levels, static)
+		if !all[cid].Peer.IsPositive() {
+			fmt.Printf("FAIL [peer] %s should get peer from %s community (static on %s); peer=%s base_lower=%s\n",
+				c.claimant, c.peerSrc, c.staticSrc, all[cid].Peer, all[sid].Base)
 			bad++
 		} else {
-			fmt.Printf("OK  [peer] %s <- %s peer=%s\n", c.claimant, c.peerSrc, got.Peer.String())
+			fmt.Printf("OK  [peer] %s <- %s peer=%s (lower community=%s)\n",
+				c.claimant, c.peerSrc, all[cid].Peer.String(), all[sid].Base.String())
 		}
 	}
 	if bad > 0 {
@@ -675,71 +672,89 @@ type communitySplitLocal struct {
 	Peer decimal.Decimal
 }
 
-func calcCommunityRewardsLocal(
-	claimant uint64,
+func computeAllCommunityLocal(
+	userIDs []uint64,
 	children map[uint64][]uint64,
 	parent map[uint64]uint64,
 	levels map[uint64]int,
-	personal map[uint64]decimal.Decimal,
 	todayStatic map[uint64]decimal.Decimal,
-) communitySplitLocal {
+) map[uint64]communitySplitLocal {
 	const minPeerLevel = 3
 	peerRate := decimal.RequireFromString("0.1")
-	selfLevel := levels[claimant]
 	rateByLv := map[int]string{1: "0.10", 2: "0.20", 3: "0.30", 4: "0.35", 5: "0.40", 6: "0.45", 7: "0.50", 8: "0.55", 9: "0.60"}
-	ru := decimal.Zero
-	if s, ok := rateByLv[selfLevel]; ok {
-		ru = decimal.RequireFromString(s)
-	}
-	out := communitySplitLocal{}
-	if !ru.IsPositive() {
-		return out
-	}
-	legs := children[claimant]
-	if len(legs) == 0 {
-		return out
-	}
-	legVols := make([]decimal.Decimal, len(legs))
-	for i, leg := range legs {
-		legVols[i] = subtreeVolume(leg, children, personal)
-	}
-	maxIdx := 0
-	for i := 1; i < len(legVols); i++ {
-		if legVols[i].GreaterThan(legVols[maxIdx]) {
-			maxIdx = i
+	out := map[uint64]communitySplitLocal{}
+	baseGot := map[uint64]decimal.Decimal{}
+	for _, claimant := range userIDs {
+		selfLevel := levels[claimant]
+		ru := decimal.Zero
+		if s, ok := rateByLv[selfLevel]; ok {
+			ru = decimal.RequireFromString(s)
 		}
-	}
-	claimantPeerOK := selfLevel >= minPeerLevel
-	base := decimal.Zero
-	peer := decimal.Zero
-	for i, legRoot := range legs {
-		if i == maxIdx {
+		if !ru.IsPositive() {
 			continue
 		}
-		ids := collectSubtreeIDsLocal(legRoot, children)
-		for _, x := range ids {
-			if underBreakLocal(x, claimant, selfLevel, parent, levels) {
-				continue
-			}
-			s := todayStatic[x]
-			if !s.IsPositive() {
-				continue
-			}
-			lv := levels[x]
-			if lv == selfLevel && claimantPeerOK && lv >= minPeerLevel {
-				peer = peer.Add(s.Mul(peerRate))
-				continue
-			}
-			gov := nearestGovLocal(x, claimant, selfLevel, parent, levels, rateByLv)
-			diff := ru.Sub(gov)
-			if diff.IsPositive() {
-				base = base.Add(s.Mul(diff))
+		base := decimal.Zero
+		for _, legRoot := range children[claimant] {
+			for _, x := range collectSubtreeIDsLocal(legRoot, children) {
+				if underBreakLocal(x, claimant, selfLevel, parent, levels) {
+					continue
+				}
+				s := todayStatic[x]
+				if !s.IsPositive() {
+					continue
+				}
+				gov := nearestGovLocal(x, claimant, parent, levels, rateByLv)
+				diff := ru.Sub(gov)
+				if diff.IsPositive() {
+					base = base.Add(s.Mul(diff))
+				}
 			}
 		}
+		base = base.Round(8)
+		if base.IsPositive() {
+			out[claimant] = communitySplitLocal{Base: base}
+			baseGot[claimant] = base
+		}
 	}
-	out.Base = base.Round(8)
-	out.Peer = peer.Round(8)
+	for fromID, base := range baseGot {
+		fromLv := levels[fromID]
+		if fromLv < minPeerLevel {
+			continue
+		}
+		recipient := nearestSameLevelUplineLocal(fromID, parent, levels)
+		if recipient == 0 || levels[recipient] != fromLv || levels[recipient] < minPeerLevel {
+			continue
+		}
+		if underBreakLocal(fromID, recipient, levels[recipient], parent, levels) {
+			continue
+		}
+		amt := base.Mul(peerRate).Round(8)
+		if !amt.IsPositive() {
+			continue
+		}
+		s := out[recipient]
+		s.Peer = s.Peer.Add(amt).Round(8)
+		out[recipient] = s
+	}
 	return out
+}
+
+func nearestSameLevelUplineLocal(node uint64, parent map[uint64]uint64, levels map[uint64]int) uint64 {
+	lv := levels[node]
+	if lv <= 0 {
+		return 0
+	}
+	cur := node
+	for {
+		p, ok := parent[cur]
+		if !ok {
+			return 0
+		}
+		if levels[p] == lv {
+			return p
+		}
+		cur = p
+	}
 }
 
 func underBreakLocal(node, claimant uint64, claimantLevel int, parent map[uint64]uint64, levels map[uint64]int) bool {
@@ -757,11 +772,11 @@ func underBreakLocal(node, claimant uint64, claimantLevel int, parent map[uint64
 	return false
 }
 
-func nearestGovLocal(node, claimant uint64, claimantLevel int, parent map[uint64]uint64, levels map[uint64]int, rateByLv map[int]string) decimal.Decimal {
+func nearestGovLocal(node, claimant uint64, parent map[uint64]uint64, levels map[uint64]int, rateByLv map[int]string) decimal.Decimal {
 	cur := node
 	last := decimal.Zero
 	for cur != claimant {
-		if lv := levels[cur]; lv > 0 && lv != claimantLevel {
+		if lv := levels[cur]; lv > 0 {
 			if s, ok := rateByLv[lv]; ok {
 				last = decimal.RequireFromString(s)
 			}

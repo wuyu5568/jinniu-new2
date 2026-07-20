@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS login_challenges (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- locations = 认购订单; status: active | exited; rate_direction: up | down
--- rate_turn_pending: extract flipped direction once this settle cycle; cleared on next settle
+-- rate_turn_pending: extract turned once this settle cycle; cleared on next settle
+-- last_settled_rate: rate used in last static settle (NULL if never settled); extract turn base
 CREATE TABLE IF NOT EXISTS locations (
     id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     user_id            BIGINT UNSIGNED NOT NULL,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS locations (
     rate_percent       DECIMAL(5, 2)   NOT NULL DEFAULT 0.60,
     rate_direction     VARCHAR(8)      NOT NULL DEFAULT 'up',
     rate_turn_pending  TINYINT(1)      NOT NULL DEFAULT 0,
+    last_settled_rate  DECIMAL(5, 2)   NULL COMMENT 'rate used in last static settle; extract turn base',
     created_at         DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at         DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     KEY idx_locations_user (user_id),

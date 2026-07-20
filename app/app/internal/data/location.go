@@ -26,6 +26,7 @@ func toBizLocation(m *LocationModel) *biz.Location {
 		RatePercent:     m.RatePercent,
 		RateDirection:   m.RateDirection,
 		RateTurnPending: m.RateTurnPending,
+		LastSettledRate: m.LastSettledRate,
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
 	}
@@ -42,6 +43,7 @@ func (r *locationRepo) Create(ctx context.Context, loc *biz.Location) (*biz.Loca
 		RatePercent:     loc.RatePercent,
 		RateDirection:   loc.RateDirection,
 		RateTurnPending: loc.RateTurnPending,
+		LastSettledRate: loc.LastSettledRate,
 	}
 	if err := r.data.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return nil, err
@@ -61,13 +63,17 @@ func (r *locationRepo) FindByID(ctx context.Context, id uint64) (*biz.Location, 
 }
 
 func (r *locationRepo) Update(ctx context.Context, loc *biz.Location) (*biz.Location, error) {
-	res := r.data.db.WithContext(ctx).Model(&LocationModel{}).Where("id = ?", loc.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"accumulated":       loc.Accumulated,
 		"status":            loc.Status,
 		"rate_percent":      loc.RatePercent,
 		"rate_direction":    loc.RateDirection,
 		"rate_turn_pending": loc.RateTurnPending,
-	})
+	}
+	if loc.LastSettledRate != nil {
+		updates["last_settled_rate"] = *loc.LastSettledRate
+	}
+	res := r.data.db.WithContext(ctx).Model(&LocationModel{}).Where("id = ?", loc.ID).Updates(updates)
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -160,7 +166,7 @@ func (r *locationRepo) ListAllPaged(ctx context.Context, address string, page, p
 	var rows []LocationModel
 	offset := (page - 1) * pageSize
 	if err := base.Session(&gorm.Session{}).
-		Select("locations.id, locations.user_id, locations.amount, locations.multiplier, locations.exit_target, locations.accumulated, locations.status, locations.rate_percent, locations.rate_direction, locations.rate_turn_pending, locations.created_at, locations.updated_at").
+		Select("locations.id, locations.user_id, locations.amount, locations.multiplier, locations.exit_target, locations.accumulated, locations.status, locations.rate_percent, locations.rate_direction, locations.rate_turn_pending, locations.last_settled_rate, locations.created_at, locations.updated_at").
 		Order("locations.id DESC").Offset(offset).Limit(pageSize).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
@@ -187,6 +193,13 @@ func (r *locationRepo) SumAmountByUser(ctx context.Context, userID uint64) (deci
 		Where("user_id = ?", userID).
 		Scan(&sum).Error
 	return sum, err
+}
+
+func (r *locationRepo) ExistsByUser(ctx context.Context, userID uint64) (bool, error) {
+	var n int64
+	err := r.data.db.WithContext(ctx).Model(&LocationModel{}).
+		Where("user_id = ?", userID).Limit(1).Count(&n).Error
+	return n > 0, err
 }
 
 func (r *locationRepo) SumAllAmount(ctx context.Context) (decimal.Decimal, error) {

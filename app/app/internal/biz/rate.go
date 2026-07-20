@@ -74,18 +74,19 @@ func AdvanceRate(current decimal.Decimal, direction string) (decimal.Decimal, st
 	return next, RateDirectionDown
 }
 
-// ReverseRateDirection flips climb/descend after extract.
-func ReverseRateDirection(direction string) string {
-	if direction == RateDirectionDown {
-		return RateDirectionUp
+// ApplyExtractRateTurn applies withdraw rate turn from lastSettled (昨日结算利率).
+// down / nil lastSettled → no change; lastSettled == rateMin → rewind to min/up;
+// otherwise AdvanceRate(lastSettled, down). Caller skips when RateTurnPending is set.
+func ApplyExtractRateTurn(direction string, lastSettled *decimal.Decimal) (rate decimal.Decimal, dir string, applied bool) {
+	if direction != RateDirectionUp || lastSettled == nil {
+		return decimal.Zero, direction, false
 	}
-	return RateDirectionDown
-}
-
-// ApplyExtractRateTurn flips climb/descend only; rate percent is unchanged.
-// Caller skips when RateTurnPending is already set (once per settle cycle).
-func ApplyExtractRateTurn(current decimal.Decimal, direction string) (decimal.Decimal, string) {
-	return current, ReverseRateDirection(direction)
+	rateMin := GetActiveParams().rateMinDec()
+	if lastSettled.Equal(rateMin) {
+		return rateMin, RateDirectionUp, true
+	}
+	rate, dir = AdvanceRate(*lastSettled, RateDirectionDown)
+	return rate, dir, true
 }
 
 // CalcStaticYield computes static yield: subscribeAmount * ratePercent / 100.

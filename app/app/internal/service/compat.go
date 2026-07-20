@@ -130,7 +130,7 @@ func (s *AppService) buildTaurusUserInfo(ctx context.Context, user *biz.User) ma
 	}
 
 	activeSum, _ := s.record.SumActiveAmount(ctx, user.ID)
-	directs, _ := s.record.CountDirectReferrals(ctx, user.ID)
+	directs, _ := s.record.CountEffectiveDirectReferrals(ctx, user.ID)
 
 	remaining := decimal.Zero
 	activeLocCount := 0
@@ -427,11 +427,15 @@ func (s *AppService) CompatRecommendList(w http.ResponseWriter, r *http.Request)
 	out := make([]map[string]any, 0, len(refs))
 	for _, u := range refs {
 		amount, _ := s.record.SumActiveAmount(r.Context(), u.ID)
-		countLow, _ := s.record.CountDirectReferrals(r.Context(), u.ID)
+		activated, _ := s.record.UserHasLocation(r.Context(), u.ID)
+		effective, _ := s.record.CountEffectiveDirectReferrals(r.Context(), u.ID)
+		registered, _ := s.record.CountDirectReferrals(r.Context(), u.ID)
 		out = append(out, map[string]any{
-			"address":  u.Address,
-			"amount":   decStr(amount),
-			"countLow": countLow,
+			"address":     u.Address,
+			"amount":      decStr(amount),
+			"countLow":    effective,
+			"activated":   activated,
+			"hasChildren": registered > 0,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"recommends": out})
@@ -801,7 +805,7 @@ func (s *AppService) CompatAdminUserList(w http.ResponseWriter, r *http.Request)
 		if u.CommunityLevelLocked {
 			vipLocked = "1"
 		}
-		directs, _ := s.record.CountDirectReferrals(r.Context(), u.ID)
+		directs, _ := s.record.CountEffectiveDirectReferrals(r.Context(), u.ID)
 		out = append(out, map[string]any{
 			"userId":              strconv.FormatUint(u.ID, 10),
 			"createdAt":           u.CreatedAt.Format("2006-01-02 15:04:05"),
@@ -1094,7 +1098,7 @@ func (s *AppService) CompatAdminRewardList(w http.ResponseWriter, r *http.Reques
 			if staticRate != "" && buyAmount != "" {
 				calcDetail = buyAmount + " × " + staticRate + "% = " + amtStr
 			}
-		case biz.LedgerCommunityBase, biz.LedgerGeneration, biz.LedgerPeer:
+		case biz.LedgerCommunityBase, biz.LedgerGeneration:
 			// 认购金额 / 静态利率 = 来源那笔静态对应的认购与利率（非领取人填单）
 			sourceStatic = parseLedgerKV(e.Remark, "static")
 			buyAmount = parseLedgerKV(e.Remark, "buy")
@@ -1125,11 +1129,19 @@ func (s *AppService) CompatAdminRewardList(w http.ResponseWriter, r *http.Reques
 				if rdec, err := decimal.NewFromString(rateTok); err == nil {
 					applyRate = formatRateFraction(rdec)
 				}
-			case biz.LedgerPeer:
-				rateTok := parseLedgerKV(e.Remark, "rate")
-				if rdec, err := decimal.NewFromString(rateTok); err == nil {
-					applyRate = formatRateFraction(rdec)
-				}
+			}
+			if sourceStatic != "" && applyRate != "" {
+				calcDetail = buildCalcDetail(sourceStatic, applyRate, amtStr)
+			}
+		case biz.LedgerPeer:
+			// 平级单笔：基数为来源用户当日社区基础奖合计；新 remark 用 community=，旧数据仍可能是 static=
+			sourceStatic = parseLedgerKV(e.Remark, "community")
+			if sourceStatic == "" {
+				sourceStatic = parseLedgerKV(e.Remark, "static")
+			}
+			rateTok := parseLedgerKV(e.Remark, "rate")
+			if rdec, err := decimal.NewFromString(rateTok); err == nil {
+				applyRate = formatRateFraction(rdec)
 			}
 			if sourceStatic != "" && applyRate != "" {
 				calcDetail = buildCalcDetail(sourceStatic, applyRate, amtStr)
@@ -1334,7 +1346,8 @@ func (s *AppService) CompatAdminUserRecommend(w http.ResponseWriter, r *http.Req
 		amount, _ := s.record.SumLocationAmount(ctx, u.ID)
 		activeAmt, _ := s.record.SumActiveAmount(ctx, u.ID)
 		subtree, _ := s.record.SumSubtreeLocationAmount(ctx, u.ID)
-		directsCount, _ := s.record.CountDirectReferrals(ctx, u.ID)
+		directsCount, _ := s.record.CountEffectiveDirectReferrals(ctx, u.ID)
+		activated, _ := s.record.UserHasLocation(ctx, u.ID)
 		out = append(out, map[string]any{
 			"userId":             strconv.FormatUint(u.ID, 10),
 			"address":            u.Address,
@@ -1346,6 +1359,7 @@ func (s *AppService) CompatAdminUserRecommend(w http.ResponseWriter, r *http.Req
 			"amountUsdtCurrent":  decStr(activeAmt),
 			"amountUsdtGet":      decStrFloor4(u.WithdrawableBalance),
 			"balanceUsdt":        decStr(u.AccountBalance),
+			"activated":          activated,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})

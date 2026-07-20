@@ -34,7 +34,8 @@ type Location struct {
 	Status          string
 	RatePercent     decimal.Decimal
 	RateDirection   string
-	RateTurnPending bool // extract flipped direction once this settle cycle; cleared on next settle
+	RateTurnPending bool             // extract turned once this settle cycle; cleared on next settle
+	LastSettledRate *decimal.Decimal // rate used in last static settle; nil if never settled
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -51,6 +52,7 @@ type LocationRepo interface {
 	ListAllPaged(ctx context.Context, address string, page, pageSize int) ([]*Location, int, error)
 	SumActiveByUser(ctx context.Context, userID uint64) (decimal.Decimal, error)
 	SumAmountByUser(ctx context.Context, userID uint64) (decimal.Decimal, error)
+	ExistsByUser(ctx context.Context, userID uint64) (bool, error)
 	SumAllAmount(ctx context.Context) (decimal.Decimal, error)
 	SumAmountCreatedBetween(ctx context.Context, from, to time.Time) (decimal.Decimal, error)
 	SumAmountByPathPrefix(ctx context.Context, pathPrefix string) (decimal.Decimal, error)
@@ -336,7 +338,12 @@ func (uc *RecordUseCase) CreateWithdraw(ctx context.Context, userID uint64, amou
 		if loc.RateTurnPending {
 			continue
 		}
-		loc.RatePercent, loc.RateDirection = ApplyExtractRateTurn(loc.RatePercent, loc.RateDirection)
+		newRate, newDir, ok := ApplyExtractRateTurn(loc.RateDirection, loc.LastSettledRate)
+		if !ok {
+			continue
+		}
+		loc.RatePercent = newRate
+		loc.RateDirection = newDir
 		loc.RateTurnPending = true
 		if _, err := uc.locations.Update(ctx, loc); err != nil {
 			return nil, err
@@ -469,9 +476,19 @@ func (uc *RecordUseCase) SumLocationAmount(ctx context.Context, userID uint64) (
 	return uc.locations.SumAmountByUser(ctx, userID)
 }
 
-// CountDirectReferrals counts direct referrals for a user.
+// CountDirectReferrals counts registered 直推 (invite relation only).
 func (uc *RecordUseCase) CountDirectReferrals(ctx context.Context, userID uint64) (int, error) {
 	return uc.users.CountDirectReferrals(ctx, userID)
+}
+
+// CountEffectiveDirectReferrals counts 有效直推 (直推 with at least one 认购订单).
+func (uc *RecordUseCase) CountEffectiveDirectReferrals(ctx context.Context, userID uint64) (int, error) {
+	return uc.users.CountEffectiveDirectReferrals(ctx, userID)
+}
+
+// UserHasLocation reports whether the user has ever opened a 认购订单.
+func (uc *RecordUseCase) UserHasLocation(ctx context.Context, userID uint64) (bool, error) {
+	return uc.locations.ExistsByUser(ctx, userID)
 }
 
 // ListAllUsers returns all users (admin dashboard).
@@ -590,9 +607,11 @@ func (uc *RecordUseCase) settleStaticOnce(ctx context.Context, orderIDs []uint64
 			result.ExitedCount++
 			continue
 		}
-		// Extract turn only flipped direction; yield still uses current rate, then advance as usual.
+		// Extract may have rewritten rate from last_settled; yield uses current rate, then advance.
 		order.RateTurnPending = false
 		rateUsed := order.RatePercent
+		lastSettled := rateUsed
+		order.LastSettledRate = &lastSettled
 		yield := CalcStaticYield(order.Amount, rateUsed)
 		if !yield.IsPositive() {
 			if _, err := uc.locations.Update(ctx, order); err != nil {
@@ -737,37 +756,38 @@ func (uc *RecordUseCase) settleCommunity(ctx context.Context, todayStatic map[ui
 		}
 		pieces = filtered
 	}
+	// Phase 1: 纯级差社区基础奖；累计每人实得社区奖供平级基数。
+	communityBaseGot := map[uint64]decimal.Decimal{}
 	for _, u := range users {
-		lines := ListCommunityRewardLinesFromPieces(u.ID, children, parent, levels, personal, pieces)
+		lines := ListCommunityBaseLinesFromPieces(u.ID, children, parent, levels, pieces)
 		for _, line := range lines {
 			src := addrByID[line.SourceUserID]
-			var entryType, remark string
-			vip := levels[u.ID]
-			fromVip := levels[line.SourceUserID]
-			switch line.Kind {
-			case CommunityLinePeer:
-				entryType = LedgerPeer
-				remark = fmt.Sprintf("peer reward from=%s static=%s rate=%s buy=%s ratePct=%s vip=%d fromVip=%d",
-					src, line.SourceStatic.String(), line.GapRate.String(), line.SourceBuy.String(), line.SourceRatePct.String(),
-					vip, fromVip)
-			default:
-				entryType = LedgerCommunityBase
-				remark = fmt.Sprintf("community base from=%s static=%s gap=%s buy=%s ratePct=%s vip=%d fromVip=%d",
-					src, line.SourceStatic.String(), line.GapRate.String(), line.SourceBuy.String(), line.SourceRatePct.String(),
-					vip, fromVip)
-			}
-			applied, err := uc.creditOrderAcceleration(ctx, u.ID, line.Amount, entryType, remark)
+			remark := fmt.Sprintf("community base from=%s static=%s gap=%s buy=%s ratePct=%s vip=%d fromVip=%d",
+				src, line.SourceStatic.String(), line.GapRate.String(), line.SourceBuy.String(), line.SourceRatePct.String(),
+				levels[u.ID], levels[line.SourceUserID])
+			applied, err := uc.creditOrderAcceleration(ctx, u.ID, line.Amount, LedgerCommunityBase, remark)
 			if err != nil {
 				return communityPaid, peerPaid, err
 			}
 			if !applied.IsPositive() {
 				continue
 			}
-			if entryType == LedgerPeer {
-				peerPaid++
-			} else {
-				communityPaid++
-			}
+			communityPaid++
+			communityBaseGot[u.ID] = communityBaseGot[u.ID].Add(applied)
+		}
+	}
+	// Phase 2: 平级 = 同级下级当日社区基础奖合计 × peer_pool_rate（不含平级本身）。
+	for _, pl := range ListPeerLinesFromCommunityBase(communityBaseGot, parent, levels) {
+		src := addrByID[pl.FromUserID]
+		remark := fmt.Sprintf("peer reward from=%s community=%s rate=%s vip=%d fromVip=%d",
+			src, pl.CommunityBase.String(), pl.PeerRate.String(),
+			levels[pl.RecipientID], levels[pl.FromUserID])
+		applied, err := uc.creditOrderAcceleration(ctx, pl.RecipientID, pl.Amount, LedgerPeer, remark)
+		if err != nil {
+			return communityPaid, peerPaid, err
+		}
+		if applied.IsPositive() {
+			peerPaid++
 		}
 	}
 	return communityPaid, peerPaid, nil
@@ -796,7 +816,7 @@ func (uc *RecordUseCase) payGenerationRewards(ctx context.Context, fromUserID ui
 		if err != nil {
 			return paid, err
 		}
-		directs, err := uc.users.CountDirectReferrals(ctx, inviterID)
+		directs, err := uc.users.CountEffectiveDirectReferrals(ctx, inviterID)
 		if err != nil {
 			return paid, err
 		}
