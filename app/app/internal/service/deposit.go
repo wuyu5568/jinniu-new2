@@ -16,13 +16,12 @@ import (
 	"github.com/jinniu/app/app/app/internal/biz"
 )
 
-// 对齐 new18new：主网充值合约 BuySomething
-const chainDepositContract = "0x49c735D94e1cc44053D23c956972cB37da3Fd5Af"
+// 金牛充值合约（分账版 buy(num)；序号 users/usersAmount）
+const chainDepositContract = "0x0f2994708Ecf85b98AAc9f5aAD4d0a036f197999"
 
 const (
-	chainDepositMinAmount = biz.MinChainDepositAmount
-	chainDepositChunk     = 50
-	chainDepositRoundWall = 90 * time.Second
+	chainDepositChunk       = 50
+	chainDepositRoundWall   = 90 * time.Second
 	chainDepositCatchupWall = 5 * time.Minute
 	chainDepositCatchupMax  = 500
 )
@@ -54,7 +53,7 @@ func (a *AppService) CompatAdminDepositChain(w http.ResponseWriter, r *http.Requ
 	defer cancel()
 
 	var (
-		res *chainDepositSyncResult
+		res *ChainDepositSyncResult
 		err error
 	)
 	if untilCaughtUp {
@@ -139,7 +138,8 @@ func (a *AppService) CompatAdminDepositReplay(w http.ResponseWriter, r *http.Req
 	})
 }
 
-type chainDepositSyncResult struct {
+// ChainDepositSyncResult is the outcome of one deposit sync pass.
+type ChainDepositSyncResult struct {
 	Pulled         int
 	Credited       int
 	Skipped        int
@@ -152,8 +152,16 @@ type chainDepositSyncResult struct {
 	CaughtUp       bool
 }
 
-func (a *AppService) syncChainDepositsCatchUp(ctx context.Context) (*chainDepositSyncResult, error) {
-	agg := &chainDepositSyncResult{SkipReasons: map[string]int{}}
+// RunChainDepositSync runs one wall-clock round of chain deposit pull (for DepositCron).
+func (a *AppService) RunChainDepositSync(ctx context.Context) (*ChainDepositSyncResult, error) {
+	return a.syncChainDeposits(ctx, chainDepositOpts{
+		Chunk:     chainDepositChunk,
+		RoundWall: chainDepositRoundWall,
+	})
+}
+
+func (a *AppService) syncChainDepositsCatchUp(ctx context.Context) (*ChainDepositSyncResult, error) {
+	agg := &ChainDepositSyncResult{SkipReasons: map[string]int{}}
 	globalDeadline := time.Now().Add(chainDepositCatchupWall)
 	remaining := chainDepositCatchupMax
 	first := true
@@ -215,14 +223,14 @@ func (a *AppService) syncChainDepositsCatchUp(ctx context.Context) (*chainDeposi
 	return agg, nil
 }
 
-func (a *AppService) syncChainDeposits(ctx context.Context, opts chainDepositOpts) (*chainDepositSyncResult, error) {
+func (a *AppService) syncChainDeposits(ctx context.Context, opts chainDepositOpts) (*ChainDepositSyncResult, error) {
 	if opts.Chunk <= 0 {
 		opts.Chunk = chainDepositChunk
 	}
 	if opts.RoundWall <= 0 {
 		opts.RoundWall = chainDepositRoundWall
 	}
-	out := &chainDepositSyncResult{SkipReasons: map[string]int{}}
+	out := &ChainDepositSyncResult{SkipReasons: map[string]int{}}
 	deadline := time.Now().Add(opts.RoundWall)
 
 	before, err := a.record.GetEthUserRecordLast(ctx)
@@ -313,7 +321,7 @@ func (a *AppService) syncChainDeposits(ctx context.Context, opts chainDepositOpt
 					out.CursorAfter = d.Index
 					processErr = nil
 				}
-			case d.Amount < chainDepositMinAmount:
+			case d.Amount < biz.MinChainDepositAmount:
 				processErr = a.record.ClaimChainDepositSkip(ctx, d.Index, d.Amount, addr, biz.ChainDepositSkipBelowMin)
 				if processErr == nil {
 					out.Skipped++
@@ -395,23 +403,35 @@ func getUserInfo(start int64, end int64, address string) ([]*userDeposit, error)
 		if err != nil {
 			return err
 		}
+		// 新分账合约无 ids；旧 BuySomething 可选拉 id，失败则忽略
 		bals3, err = instance.GetIdsByIndex(opts, startBI, endBI)
-		return err
+		if err != nil {
+			bals3 = nil
+			return nil
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if len(bals) != len(bals2) || len(bals) != len(bals3) {
-		return nil, fmt.Errorf("chain deposit batch length mismatch users=%d amounts=%d ids=%d", len(bals), len(bals2), len(bals3))
+	if len(bals) != len(bals2) {
+		return nil, fmt.Errorf("chain deposit batch length mismatch users=%d amounts=%d", len(bals), len(bals2))
+	}
+	if bals3 != nil && len(bals) != len(bals3) {
+		return nil, fmt.Errorf("chain deposit batch length mismatch users=%d ids=%d", len(bals), len(bals3))
 	}
 
 	users := make([]*userDeposit, 0, len(bals))
 	for k, v := range bals {
+		id := int64(0)
+		if bals3 != nil {
+			id = bals3[k].Int64()
+		}
 		users = append(users, &userDeposit{
 			Index:   start + int64(k),
 			Address: v.String(),
 			Amount:  amountAsUSDT(bals2[k]),
-			Id:      bals3[k].Int64(),
+			Id:      id,
 		})
 	}
 	return users, nil

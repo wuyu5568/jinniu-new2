@@ -1,4 +1,4 @@
-# Nginx + HTTPS（L1：go.wulid.com）
+# Nginx + HTTPS（jinniuxieyi.com）
 
 约定：
 
@@ -8,7 +8,16 @@
 | `/admin/` | 管理端 dapp-admin |
 | `/api/` | 反代本机 `127.0.0.1:8000` |
 
-域名：`go.wulid.com`、`www.go.wulid.com` → EC2 公网 IP。
+### 浏览器缓存策略（`docs/nginx/jinniu.site.conf`）
+
+| 资源 | 策略 |
+|------|------|
+| `index.html` / `/admin/index.html` / SPA fallback | `Cache-Control: no-cache, no-store`（发版立刻换入口） |
+| `/static/*`、`/admin/js|css|…`（带 hash） | `expires 30d` + `immutable` |
+| 其它静态扩展名 | `expires 7d` |
+| `/api/`、`/health` | `no-store`（不做 `proxy_cache`） |
+
+域名：`jinniuxieyi.com`、`www.jinniuxieyi.com` → EC2 公网 IP（`54.150.130.182`）。
 
 ## 1. 安全组
 
@@ -40,89 +49,32 @@ scp -i C:\Users\Lenovo\Desktop\github\sssss.pem -r C:\Users\Lenovo\Desktop\githu
 # sudo chown -R www-data:www-data /var/www/jinniu/html/admin && sudo chmod -R a+rX /var/www/jinniu/html/admin
 ```
 
-## 4. Nginx 站点（先 HTTP，再签证书）
+## 4. Nginx 站点
 
-```bash
-sudo nano /etc/nginx/sites-available/jinniu
-```
-
-内容：
-
-```nginx
-server {
-    listen 80;
-    server_name go.wulid.com www.go.wulid.com;
-
-    root /var/www/jinniu/html;
-    index index.html;
-
-    client_max_body_size 20m;
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000/api/;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 360s;
-        proxy_send_timeout 360s;
-    }
-
-    location /admin {
-        try_files $uri $uri/ /admin/index.html;
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-```
-
-启用：
+仓库参考：`docs/nginx/jinniu.site.conf` → `/etc/nginx/sites-available/jinniu`。
 
 ```bash
 sudo ln -sf /etc/nginx/sites-available/jinniu /etc/nginx/sites-enabled/jinniu
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-本机测：
-
-```bash
-curl -sI http://go.wulid.com/ | head -5
-curl -s http://go.wulid.com/api/ | head -c 200
-curl -s http://127.0.0.1:8000/health
-```
-
-健康检查仍在后端根路径，可另加：
-
-```nginx
-    location = /health {
-        proxy_pass http://127.0.0.1:8000/health;
-    }
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## 5. Let’s Encrypt
 
 ```bash
-sudo certbot --nginx -d go.wulid.com -d www.go.wulid.com
+sudo certbot --nginx -d jinniuxieyi.com -d www.jinniuxieyi.com
 ```
 
 按提示选 redirect HTTP→HTTPS。续期：`sudo certbot renew --dry-run`。
 
 ## 6. 浏览器验收
 
-- 用户端：https://go.wulid.com/
-- 管理端：https://go.wulid.com/admin/
+- 用户端：https://jinniuxieyi.com/ 或 https://www.jinniuxieyi.com/
+- 管理端：https://jinniuxieyi.com/admin/
 - API：登录管理端看首页打款提示
 
-前端 `url.js` / `VITE_API` 须为 `https://go.wulid.com`（已按此打包）。
+前端 `url.js` / `VITE_API` 须为 `https://jinniuxieyi.com`。
 
 ## 7. 限流 / 连接限制 / 基础加固（仅金牛）
-
-仓库参考配置：
 
 | 文件 | 部署位置 |
 |------|----------|
@@ -138,8 +90,6 @@ sudo certbot --nginx -d go.wulid.com -d www.go.wulid.com
 | `/health` | 不走 API 限流区 | — | 走整站连接上限 |
 
 超限返回 **429**。另：`server_tokens off`；仅允许 `GET/POST/HEAD/OPTIONS`（其余 **405**）；`client_max_body_size 20m`；header/body 超时 10s。
-
-改完后：
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx

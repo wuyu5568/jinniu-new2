@@ -24,6 +24,8 @@ app:
   #   可选 $env:JINNIU_BSC_RPC="https://..."
   payout_enabled: false
   payout_cron: ""
+  # 链上充值自动入账（每分钟）；空则仅管理端手动拉
+  deposit_cron: "*/1 * * * *"
   bsc_rpc: "https://bsc-dataseed.binance.org/"
   usdt_address: "0x55d398326f99059fF775485246999027B3197955"
   hot_wallet_key: ""

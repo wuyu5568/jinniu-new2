@@ -51,6 +51,7 @@ type App struct {
 	// 提取打款（ADR 0010）；生产开启前务必配置热钱包与 RPC
 	PayoutEnabled bool   `yaml:"payout_enabled"`
 	PayoutCron    string `yaml:"payout_cron"` // 空则不开定时打款
+	DepositCron   string `yaml:"deposit_cron"` // 空则不开定时拉链上充值；如 "*/1 * * * *" 每分钟
 	BscRPC        string `yaml:"bsc_rpc"`
 	UsdtAddress   string `yaml:"usdt_address"`
 	HotWalletKey  string `yaml:"hot_wallet_key"` // hex，勿提交真实密钥；可用环境变量覆盖

@@ -178,7 +178,10 @@ func (r *withdrawRepo) MarkPass(ctx context.Context, id uint64) (bool, error) {
 	res := r.data.db.WithContext(ctx).Model(&WithdrawModel{}).
 		Where("id = ? AND status = ?", id, biz.WithdrawDoing).
 		Where("tx_hash <> ?", "").
-		Update("status", biz.WithdrawPass)
+		Updates(map[string]any{
+			"status":       biz.WithdrawPass,
+			"payout_error": "",
+		})
 	if res.Error != nil {
 		return false, res.Error
 	}

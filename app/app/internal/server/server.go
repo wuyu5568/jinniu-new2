@@ -8,12 +8,13 @@ import (
 )
 
 // ProviderSet is the server layer wire set.
-var ProviderSet = wire.NewSet(NewHTTPServer, NewSettleCron, NewPayoutCron, NewApp)
+var ProviderSet = wire.NewSet(NewHTTPServer, NewSettleCron, NewPayoutCron, NewDepositCron, NewApp)
 
 // NewApp wires Kratos application (HTTP only for P0 skeleton).
-func NewApp(cfg *conf.Bootstrap, hs *http.Server, cron *SettleCron, payout *PayoutCron) (*kratos.App, func(), error) {
+func NewApp(cfg *conf.Bootstrap, hs *http.Server, cron *SettleCron, payout *PayoutCron, deposit *DepositCron) (*kratos.App, func(), error) {
 	cron.Start()
 	payout.Start()
+	deposit.Start()
 	app := kratos.New(
 		kratos.Name("jinniu-app"),
 		kratos.Server(hs),
@@ -21,6 +22,7 @@ func NewApp(cfg *conf.Bootstrap, hs *http.Server, cron *SettleCron, payout *Payo
 	cleanup := func() {
 		cron.Stop()
 		payout.Stop()
+		deposit.Stop()
 	}
 	return app, cleanup, nil
 }

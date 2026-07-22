@@ -472,6 +472,9 @@ func (s *AppService) CompatRewardList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		addr, num := parseGenerationRemark(e.Remark)
+		if e.EntryType != biz.LedgerGeneration {
+			num = ""
+		}
 		list = append(list, map[string]any{
 			"id":        e.ID,
 			"amount":    e.Amount.String(),

@@ -106,14 +106,11 @@ func (uc *RecordUseCase) ProcessWithdrawPayout(ctx context.Context, id uint64) (
 }
 
 func (uc *RecordUseCase) confirmPayout(ctx context.Context, w *Withdraw) (*Withdraw, error) {
-	mined, success, err := payout.ReceiptOK(ctx, uc.payoutCfg.RPC, w.TxHash)
+	// Poll until mined (async CreateWithdraw already allows up to ~3min).
+	success, err := payout.WaitReceipt(ctx, uc.payoutCfg.RPC, w.TxHash)
 	if err != nil {
 		_ = uc.withdraws.SetPayoutError(ctx, w.ID, err.Error())
-		return nil, err
-	}
-	if !mined {
-		_ = uc.withdraws.SetPayoutError(ctx, w.ID, "tx not mined yet")
-		w.PayoutError = "tx not mined yet"
+		w.PayoutError = err.Error()
 		return w, nil
 	}
 	if !success {

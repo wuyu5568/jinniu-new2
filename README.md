@@ -34,6 +34,7 @@ mysql -h127.0.0.1 -uroot -proot jinniu < scripts/schema.sql
 | `app.allow_force_settle` | 是否允许 `force=1` 强跑日结（生产务必 `false`；本地/e2e 可 `true`） |
 | `app.payout_enabled` | 是否允许提取链上打款（默认 `false`；也可用环境变量 `JINNIU_PAYOUT_ENABLED=1` 覆盖）。**开启时必须**同时设 `JINNIU_PAYOUT_MAX_USDT>0`，否则拒绝启动 |
 | `app.payout_cron` | 打款队列 cron（空则仅管理端触发） |
+| `app.deposit_cron` | 链上充值自动拉取 cron（空则仅管理端触发；默认 `*/1 * * * *`） |
 | `app.bsc_rpc` / `usdt_address` / `hot_wallet_key` | BSC RPC、USDT 合约、热钱包私钥（勿提交仓库；私钥优先用 `JINNIU_HOT_WALLET_KEY`） |
 
 ## 运行
@@ -94,7 +95,7 @@ HTTP 默认 `0.0.0.0:8000`，健康检查 `GET /health`（含 MySQL ping：`db=o
 
 ## 链上充值（对齐 new18new）
 
-1. 用户端 `/recharge`：授权 USDT 后调用合约 `buy(金额, 1)`（合约 `0x49c735…`，最低 100）
+1. 用户端 `/recharge`：授权 USDT 后调用合约 `buy(金额)`（合约 `0x0f299470…` 分账版；最低 5 USDT）
 2. 管理端「账户余额充值」页点 **拉链上充值**，或 `GET /api/admin_jinniu/deposit`（管理 JWT）
 3. 回执含 `pulled/credited/skipped/errors/caught_up` 与游标前后；`?until_caught_up=1` 可多轮追上（上限 5min/500）；迁移：`scripts/migrate_eth_deposit_cursor.sql`
 4. 详见 [docs/adr/0007-chain-deposit-new18new.md](docs/adr/0007-chain-deposit-new18new.md)

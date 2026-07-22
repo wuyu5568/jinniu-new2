@@ -76,6 +76,7 @@ mysql -h<HOST> -u<USER> -p jinniu < scripts/seed_config_names_zh.sql
 | `app.bsc_rpc` / `usdt_address` | BSC 主网 RPC；USDT `0x55d398…7955`（与现网一致即可） |
 | `app.settle_cron` / `settle_timezone` | 如 `0 0 * * *` + `Asia/Shanghai` |
 | `app.payout_cron` | 可选；空 = 仅管理端点打款 |
+| `app.deposit_cron` | 链上充值自动拉取；默认 `*/1 * * * *`；空 = 仅管理端点 |
 
 ---
 

@@ -61,7 +61,8 @@ func newApp(cfg *conf.Bootstrap, d *data.Data) (*kratos.App, func(), error) {
 	hs := server.NewHTTPServer(cfg, svc)
 	settleCron := server.NewSettleCron(&cfg.App, recordUC)
 	payoutCron := server.NewPayoutCron(&cfg.App, recordUC)
-	return server.NewApp(cfg, hs, settleCron, payoutCron)
+	depositCron := server.NewDepositCron(&cfg.App, svc)
+	return server.NewApp(cfg, hs, settleCron, payoutCron, depositCron)
 }
 
 type repoBundle struct {

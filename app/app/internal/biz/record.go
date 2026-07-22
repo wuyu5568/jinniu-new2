@@ -1125,7 +1125,7 @@ const (
 	ChainDepositStatusSkipped = "skipped"
 	ChainDepositSkipUnreg     = "unregistered"
 	ChainDepositSkipBelowMin  = "below_min"
-	MinChainDepositAmount     = 100
+	MinChainDepositAmount     = 5 // 链上充值最低 5 USDT
 )
 
 // ClaimChainDepositSkip writes a skipped row for contract index (advances cursor).

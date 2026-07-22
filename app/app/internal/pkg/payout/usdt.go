@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -74,6 +75,32 @@ func ReceiptOK(ctx context.Context, rpcURL, txHash string) (mined bool, success 
 		return false, false, nil
 	}
 	return true, r.Status == types.ReceiptStatusSuccessful, nil
+}
+
+// WaitReceipt polls until the tx is mined or ctx is done.
+// Returns success=true only when receipt status is successful.
+func WaitReceipt(ctx context.Context, rpcURL, txHash string) (success bool, err error) {
+	client, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return false, err
+	}
+	defer client.Close()
+
+	hash := common.HexToHash(txHash)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		r, rerr := client.TransactionReceipt(ctx, hash)
+		if rerr == nil && r != nil {
+			return r.Status == types.ReceiptStatusSuccessful, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("tx not mined yet")
+		case <-ticker.C:
+		}
+	}
 }
 
 // HotAddress derives address from private key hex.
